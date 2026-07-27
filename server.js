@@ -16,7 +16,7 @@ const ROLE_INFO = {
   CREW: { label:'선원', faction:'CREW', icon:'crew.png', description:'특별한 능력은 없습니다. 토론과 투표로 그노시아를 찾아내세요.' },
   GNOSIA: { label:'그노시아', faction:'GNOSIA', icon:'gnosia.png', description:'매일 밤 한 명을 소멸시킵니다. 동료 그노시아를 확인할 수 있습니다.' },
   ENGINEER: { label:'엔지니어', faction:'CREW', icon:'engineer.png', description:'매일 밤 한 명을 조사해 인간인지 그노시아인지 판정합니다.' },
-  DOCTOR: { label:'의사', faction:'CREW', icon:'doctor.png', description:'콜드슬립된 플레이어가 인간인지 그노시아인지 판정합니다.' },
+  DOCTOR: { label:'닥터', faction:'CREW', icon:'doctor.png', description:'콜드슬립된 플레이어가 인간인지 그노시아인지 판정합니다.' },
   GUARD: { label:'선내 대기인', faction:'CREW', icon:'guard.png', description:'두 명이 한 쌍으로 배정되며, 서로가 확정적으로 인간임을 알고 시작합니다.' },
   AC: { label:'AC주의자', faction:'GNOSIA', icon:'ac.png', description:'인간으로 판정되지만 그노시아 진영의 승리를 돕습니다.' },
   BUG: { label:'버그', faction:'BUG', icon:'bug.png', description:'끝까지 생존하면 단독 승리합니다. 엔지니어에게 조사되면 소멸합니다.' },
