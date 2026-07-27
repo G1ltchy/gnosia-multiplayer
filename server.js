@@ -36,11 +36,11 @@ function alive(room){ return room.players.filter(p=>p.alive); }
 function publicState(room){
   const resultPlayers=room.phase==='GAME_END'?room.players.map(p=>{
     const info=ROLE_INFO[p.role]||ROLE_INFO.CREW;
-    return {id:p.id,nickname:p.nickname,alive:p.alive,role:p.role,roleLabel:info.label,faction:info.faction,isWinner:info.faction===room.winner};
+    return {id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,role:p.role,roleLabel:info.label,faction:info.faction,isWinner:info.faction===room.winner};
   }):undefined;
   return {
     code:room.code, phase:room.phase, day:room.day, hostId:room.hostId,
-    players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,ready:p.ready,online:!!p.socketId})),
+    players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready,online:!!p.socketId})),
     config:room.config, logs:room.logs.slice(-80), voteRound:room.voteRound,
     submitted:{ votes:Object.keys(room.votes).length, night:Object.keys(room.nightActions).length },
     winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers
@@ -106,7 +106,7 @@ function winnerCheck(room){
 io.on('connection',(socket)=>{
   socket.on('createRoom',({nickname},cb)=>{
     let c; do c=code(); while(rooms.has(c));
-    const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,ready:false,role:null,personalLogs:[]};
+    const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
     const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
@@ -119,7 +119,7 @@ io.on('connection',(socket)=>{
     else {
       if(room.phase!=='LOBBY') return cb?.({ok:false,error:'이미 게임이 시작되었습니다.'});
       if(room.players.some(x=>x.nickname===nickname.trim())) return cb?.({ok:false,error:'이미 사용 중인 이름입니다.'});
-      p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,ready:false,role:null,personalLogs:[]};
+      p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
       room.players.push(p); log(room,`${p.nickname}이 참가했습니다.`);
     }
     socket.join(c); socket.data.room=c; socket.data.player=p.id; emitRoom(room); cb?.({ok:true,code:c,token:p.token});
@@ -134,7 +134,7 @@ io.on('connection',(socket)=>{
     const roles=configuredRoles(r.config);
     if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
-    const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.personalLogs=[];});
+    const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.elimination=null;x.personalLogs=[];});
     r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.nightActions={};r.privateRooms=[];r.privateLocations={};r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
@@ -197,7 +197,7 @@ function resolveVote(r){
   log(r,`투표 ${r.voteRound}차: ${lines}`,'vote');
   if(tied.length>1&&r.voteRound<3){r.voteRound++;r.votes={};log(r,`동률입니다. ${r.voteRound}차 재투표를 실시합니다.`,'vote');emitRoom(r);return;}
   if(tied.length>1){log(r,'3차 투표도 동률이므로 누구도 콜드슬립되지 않습니다.','vote');r.lastCold=null;}
-  else {const t=r.players.find(x=>x.id===tied[0]);t.alive=false;r.lastCold=t.id;log(r,`${t.nickname}이 콜드슬립되었습니다.`,'cold');}
+  else {const t=r.players.find(x=>x.id===tied[0]);t.alive=false;t.elimination='COLD_SLEEP';r.lastCold=t.id;log(r,`${t.nickname}이 콜드슬립되었습니다.`,'cold');}
   if(r.lastCold){r.players.filter(x=>x.role==='DOCTOR'&&x.alive).forEach(d=>personal(d,`${r.players.find(x=>x.id===r.lastCold).nickname}: ${r.players.find(x=>x.id===r.lastCold).role==='GNOSIA'?'그노시아':'인간'}`));}
   r.phase='VOTE_RESULT';emitRoom(r);
 }
@@ -205,12 +205,12 @@ function resolveVote(r){
 function resolveNight(r){
   const actions=Object.values(r.nightActions);
   const eng=actions.filter(a=>a.role==='ENGINEER');
-  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);if(target.role==='BUG'){target.alive=false;personal(actor,`${target.nickname}: 버그 소멸`);log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}else personal(actor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`);});
+  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);if(target.role==='BUG'){target.alive=false;target.elimination='VANISHED';personal(actor,`${target.nickname}: 버그 소멸`);log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}else personal(actor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`);});
   const guards=new Set(actions.filter(a=>a.role==='ANGEL').map(a=>a.targetId));
   const attacks=actions.filter(a=>a.role==='GNOSIA').map(a=>a.targetId);
   let victim=null;if(attacks.length){const freq={};attacks.forEach(id=>freq[id]=(freq[id]||0)+1);victim=Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];}
   if(victim&&guards.has(victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
-  else if(victim){const v=r.players.find(x=>x.id===victim);if(v&&v.alive&&v.role!=='GNOSIA'){v.alive=false;log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
+  else if(victim){const v=r.players.find(x=>x.id===victim);if(v&&v.alive&&v.role!=='GNOSIA'){v.alive=false;v.elimination='VANISHED';log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
   else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');emitRoom(r);
 }
