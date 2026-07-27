@@ -9,7 +9,7 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(express.static('public'));
 
 const rooms = new Map();
-const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_RESULT','NIGHT','PRIVATE','NIGHT_RESULT','GAME_END'];
+const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_RESULT','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
 
 const ROLE_INFO = {
@@ -49,18 +49,19 @@ function publicState(room){
 function privateState(room,p){
   const info=ROLE_INFO[p.role] || ROLE_INFO.CREW;
   const meetingRooms=(room.privateRooms||[]).map(r=>({
-    id:r.id, name:r.name, type:r.type, locked:r.locked, ownerId:r.ownerId,
-    occupants:room.players.filter(x=>room.privateLocations?.[x.id]===r.id).map(x=>x.nickname)
+    id:r.id, name:r.name, type:r.type, locked:r.locked, ownerId:r.ownerId
   }));
   const currentRoom=meetingRooms.find(r=>r.id===room.privateLocations?.[p.id]);
   const currentRoomData=(room.privateRooms||[]).find(r=>r.id===currentRoom?.id);
+  const messageSince=room.privateMessageSince?.[p.id]||0;
   return {
     id:p.id, token:p.token, nickname:p.nickname, role:p.role, roleInfo:info,
     alive:p.alive, isHost:p.id===room.hostId, personalLogs:p.personalLogs,
     teammates:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.nickname):[],
     actionSubmitted:!!room.nightActions[p.id], voteSubmitted:!!room.votes[p.id],
     meetingRooms,
-    currentRoom:currentRoom?{...currentRoom,messages:currentRoomData?.messages||[]}:null
+    currentRoom:currentRoom?{...currentRoom,messages:(currentRoomData?.messages||[]).filter(m=>m.seq>messageSince)}:null,
+    gnosiaMessages:p.role==='GNOSIA'?(room.gnosiaMessages||[]):undefined
   };
 }
 function emitRoom(room){
@@ -91,6 +92,9 @@ function setupPrivateRooms(room) {
   }));
   room.privateRooms=[...personalRooms,...publicRooms];
   room.privateLocations=Object.fromEntries(alive(room).map(p=>[p.id,`personal-${p.id}`]));
+  room.privateMessageSeq=0;
+  room.privateMessageSince=Object.fromEntries(alive(room).map(p=>[p.id,0]));
+  room.gnosiaMessages=[];
 }
 
 function winnerCheck(room){
@@ -107,7 +111,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',({nickname},cb)=>{
     let c; do c=code(); while(rooms.has(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateEndsAt:null};
+    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -135,7 +139,7 @@ io.on('connection',(socket)=>{
     if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.elimination=null;x.personalLogs=[];});
-    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.nightActions={};r.privateRooms=[];r.privateLocations={};r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
+    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
   socket.on('advancePhase',()=>{
@@ -144,7 +148,7 @@ io.on('connection',(socket)=>{
     else if(r.phase==='DISCUSSION'){r.phase='VOTE';r.votes={};r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
     else if(r.phase==='VOTE_RESULT'){
       if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
-      else {r.phase='NIGHT';r.nightActions={};log(r,'밤이 되었습니다. 역할 행동을 제출하세요.','night');}
+      else {r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
     } else if(r.phase==='NIGHT'){ resolveNight(r); }
     else if(r.phase==='PRIVATE'){ endPrivate(r); }
     else if(r.phase==='NIGHT_RESULT'){
@@ -173,7 +177,7 @@ io.on('connection',(socket)=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return cb?.({ok:false,error:'지금은 방을 이동할 수 없습니다.'});
     const target=r.privateRooms.find(x=>x.id===roomId);if(!target)return cb?.({ok:false,error:'존재하지 않는 방입니다.'});
     if(target.locked&&target.ownerId!==p.id)return cb?.({ok:false,error:'문이 잠겨 있습니다.'});
-    r.privateLocations[p.id]=target.id;emitRoom(r);cb?.({ok:true});
+    r.privateLocations[p.id]=target.id;r.privateMessageSince[p.id]=r.privateMessageSeq;emitRoom(r);cb?.({ok:true});
   });
   socket.on('togglePrivateRoomLock',(_,cb)=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return cb?.({ok:false,error:'지금은 문을 잠글 수 없습니다.'});
@@ -184,7 +188,12 @@ io.on('connection',(socket)=>{
   socket.on('privateMessage',({text})=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return;
     const current=r.privateRooms.find(x=>x.id===r.privateLocations[p.id]);const message=String(text||'').trim().slice(0,500);if(!current||!message)return;
-    current.messages.push({from:p.id,nickname:p.nickname,text:message,time:Date.now()});current.messages=current.messages.slice(-100);emitRoom(r);
+    current.messages.push({seq:++r.privateMessageSeq,from:p.id,nickname:p.nickname,text:message,time:Date.now()});current.messages=current.messages.slice(-100);emitRoom(r);
+  });
+  socket.on('gnosiaMessage',({text})=>{
+    const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive||p.role!=='GNOSIA')return;
+    const message=String(text||'').trim().slice(0,500);if(!message)return;
+    r.gnosiaMessages.push({from:p.id,nickname:p.nickname,text:message,time:Date.now()});r.gnosiaMessages=r.gnosiaMessages.slice(-100);emitRoom(r);
   });
 
   socket.on('disconnect',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=r.players.find(x=>x.id===socket.data.player);if(p)p.socketId=null;emitRoom(r); });
@@ -212,9 +221,9 @@ function resolveNight(r){
   if(victim&&guards.has(victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   else if(victim){const v=r.players.find(x=>x.id===victim);if(v&&v.alive&&v.role!=='GNOSIA'){v.alive=false;v.elimination='VANISHED';log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
   else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
-  r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');emitRoom(r);
+  r.phase='NIGHT_RESULT';log(r,'밤의 결과가 공개되었습니다.','night');emitRoom(r);
 }
-function endPrivate(r){ r.privateRooms=[];r.privateLocations={};r.privateEndsAt=null;r.phase='NIGHT_RESULT';log(r,'밀회가 종료되었습니다.','private'); }
+function endPrivate(r){ r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.privateEndsAt=null;r.nightActions={};r.phase='NIGHT';log(r,'밀회가 종료되고 밤이 되었습니다. 역할 행동을 제출하세요.','night'); }
 
 const PORT=process.env.PORT||3000;
 server.listen(PORT,'0.0.0.0',()=>console.log(`GNOSIA moderator running on http://localhost:${PORT}`));
