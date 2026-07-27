@@ -44,13 +44,19 @@ function publicState(room){
 }
 function privateState(room,p){
   const info=ROLE_INFO[p.role] || ROLE_INFO.CREW;
+  const meetingRooms=(room.privateRooms||[]).map(r=>({
+    id:r.id, name:r.name, type:r.type, locked:r.locked, ownerId:r.ownerId,
+    occupants:room.players.filter(x=>room.privateLocations?.[x.id]===r.id).map(x=>x.nickname)
+  }));
+  const currentRoom=meetingRooms.find(r=>r.id===room.privateLocations?.[p.id]);
+  const currentRoomData=(room.privateRooms||[]).find(r=>r.id===currentRoom?.id);
   return {
     id:p.id, token:p.token, nickname:p.nickname, role:p.role, roleInfo:info,
     alive:p.alive, isHost:p.id===room.hostId, personalLogs:p.personalLogs,
     teammates:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.nickname):[],
     actionSubmitted:!!room.nightActions[p.id], voteSubmitted:!!room.votes[p.id],
-    privateInvites:room.privateInvites.filter(x=>x.to===p.id&&x.status==='PENDING').map(x=>({id:x.id,from:room.players.find(y=>y.id===x.from)?.nickname})),
-    privateSession:room.privateSessions.find(s=>s.members.includes(p.id)&&s.active) || null
+    meetingRooms,
+    currentRoom:currentRoom?{...currentRoom,messages:currentRoomData?.messages||[]}:null
   };
 }
 function emitRoom(room){
@@ -72,6 +78,16 @@ function configuredRoles(config) {
     ...SPECIAL_ROLES.flatMap(role => config[role] ? Array(role === 'guard' ? 2 : 1).fill(role.toUpperCase()) : [])
   ];
 }
+function setupPrivateRooms(room) {
+  const publicRooms=['식당','라운지','창고'].map((name,index)=>({
+    id:`public-${index}`,name,type:'PUBLIC',ownerId:null,locked:false,messages:[]
+  }));
+  const personalRooms=alive(room).map(p=>({
+    id:`personal-${p.id}`,name:`${p.nickname}의 개인실`,type:'PERSONAL',ownerId:p.id,locked:false,messages:[]
+  }));
+  room.privateRooms=[...personalRooms,...publicRooms];
+  room.privateLocations=Object.fromEntries(alive(room).map(p=>[p.id,`personal-${p.id}`]));
+}
 
 function winnerCheck(room){
   const living=alive(room);
@@ -87,7 +103,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',({nickname},cb)=>{
     let c; do c=code(); while(rooms.has(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateInvites:[],privateSessions:[],privateEndsAt:null};
+    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -115,7 +131,7 @@ io.on('connection',(socket)=>{
     if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.personalLogs=[];});
-    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.nightActions={};r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
+    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.nightActions={};r.privateRooms=[];r.privateLocations={};r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
   socket.on('advancePhase',()=>{
@@ -149,19 +165,22 @@ io.on('connection',(socket)=>{
     r.nightActions[p.id]={role:p.role,targetId:t.id}; emitRoom(r); cb?.({ok:true});
   });
 
-  socket.on('invitePrivate',({targetId},cb)=>{
-    const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||r.phase!=='PRIVATE'||!p.alive)return;
-    const t=r.players.find(x=>x.id===targetId&&x.alive&&x.id!==p.id); if(!t)return;
-    if(r.privateInvites.some(x=>x.from===p.id&&x.status==='PENDING')) return cb?.({ok:false,error:'이미 보낸 초대가 있습니다.'});
-    const inv={id:crypto.randomUUID(),from:p.id,to:t.id,status:'PENDING'};r.privateInvites.push(inv);emitRoom(r);cb?.({ok:true});
+  socket.on('movePrivateRoom',({roomId},cb)=>{
+    const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return cb?.({ok:false,error:'지금은 방을 이동할 수 없습니다.'});
+    const target=r.privateRooms.find(x=>x.id===roomId);if(!target)return cb?.({ok:false,error:'존재하지 않는 방입니다.'});
+    if(target.locked&&target.ownerId!==p.id)return cb?.({ok:false,error:'문이 잠겨 있습니다.'});
+    r.privateLocations[p.id]=target.id;emitRoom(r);cb?.({ok:true});
   });
-  socket.on('respondPrivate',({inviteId,accept})=>{
-    const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p)return; const inv=r.privateInvites.find(x=>x.id===inviteId&&x.to===p.id&&x.status==='PENDING');if(!inv)return;
-    inv.status=accept?'ACCEPTED':'REJECTED'; if(accept)r.privateSessions.push({id:crypto.randomUUID(),members:[inv.from,inv.to],messages:[],active:true});emitRoom(r);
+  socket.on('togglePrivateRoomLock',(_,cb)=>{
+    const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return cb?.({ok:false,error:'지금은 문을 잠글 수 없습니다.'});
+    const current=r.privateRooms.find(x=>x.id===r.privateLocations[p.id]);
+    if(!current||current.type!=='PERSONAL'||current.ownerId!==p.id)return cb?.({ok:false,error:'자신의 개인실 안에서만 문을 잠글 수 있습니다.'});
+    current.locked=!current.locked;emitRoom(r);cb?.({ok:true,locked:current.locked});
   });
   socket.on('privateMessage',({text})=>{
-    const r=rooms.get(socket.data.room), p=player(r,socket);if(!r||!p||r.phase!=='PRIVATE')return;const s=r.privateSessions.find(x=>x.active&&x.members.includes(p.id));if(!s)return;
-    const msg={from:p.id,nickname:p.nickname,text:String(text||'').slice(0,500),time:Date.now()};s.messages.push(msg);s.members.forEach(id=>{const q=r.players.find(x=>x.id===id);if(q?.socketId)io.to(q.socketId).emit('privateMessage',msg);});
+    const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return;
+    const current=r.privateRooms.find(x=>x.id===r.privateLocations[p.id]);const message=String(text||'').trim().slice(0,500);if(!current||!message)return;
+    current.messages.push({from:p.id,nickname:p.nickname,text:message,time:Date.now()});current.messages=current.messages.slice(-100);emitRoom(r);
   });
 
   socket.on('disconnect',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=r.players.find(x=>x.id===socket.data.player);if(p)p.socketId=null;emitRoom(r); });
@@ -189,9 +208,9 @@ function resolveNight(r){
   if(victim&&guards.has(victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   else if(victim){const v=r.players.find(x=>x.id===victim);if(v&&v.alive&&v.role!=='GNOSIA'){v.alive=false;log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
   else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
-  r.phase='PRIVATE';r.privateInvites=[];r.privateSessions=[];r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 원하는 상대에게 초대를 보내세요.','private');emitRoom(r);
+  r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');emitRoom(r);
 }
-function endPrivate(r){ r.privateSessions.forEach(s=>s.active=false);r.privateEndsAt=null;r.phase='NIGHT_RESULT';log(r,'밀회가 종료되었습니다.','private'); }
+function endPrivate(r){ r.privateRooms=[];r.privateLocations={};r.privateEndsAt=null;r.phase='NIGHT_RESULT';log(r,'밀회가 종료되었습니다.','private'); }
 
 const PORT=process.env.PORT||3000;
 server.listen(PORT,'0.0.0.0',()=>console.log(`GNOSIA moderator running on http://localhost:${PORT}`));
