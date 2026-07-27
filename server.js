@@ -17,10 +17,10 @@ const ROLE_INFO = {
   GNOSIA: { label:'그노시아', faction:'GNOSIA', icon:'gnosia.png', description:'매일 밤 한 명을 소멸시킵니다. 동료 그노시아를 확인할 수 있습니다.' },
   ENGINEER: { label:'엔지니어', faction:'CREW', icon:'engineer.png', description:'매일 밤 한 명을 조사해 인간인지 그노시아인지 판정합니다.' },
   DOCTOR: { label:'의사', faction:'CREW', icon:'doctor.png', description:'콜드슬립된 플레이어가 인간인지 그노시아인지 판정합니다.' },
-  GUARD: { label:'수호천사', faction:'CREW', icon:'guard.png', description:'매일 밤 한 명을 보호합니다. 자신은 보호할 수 없습니다.' },
+  GUARD: { label:'선내 대기인', faction:'CREW', icon:'guard.png', description:'두 명이 한 쌍으로 배정되며, 서로가 확정적으로 인간임을 알고 시작합니다.' },
   AC: { label:'AC주의자', faction:'GNOSIA', icon:'ac.png', description:'인간으로 판정되지만 그노시아 진영의 승리를 돕습니다.' },
   BUG: { label:'버그', faction:'BUG', icon:'bug.png', description:'끝까지 생존하면 단독 승리합니다. 엔지니어에게 조사되면 소멸합니다.' },
-  ANGEL: { label:'천사', faction:'CREW', icon:'angel.png', description:'보조 역할입니다. 현재 버전에서는 일반 선원처럼 행동합니다.' }
+  ANGEL: { label:'수호천사', faction:'CREW', icon:'angel.png', description:'매일 밤 한 명을 보호합니다. 자신은 보호할 수 없습니다.' }
 };
 
 function code() {
@@ -47,7 +47,7 @@ function privateState(room,p){
   return {
     id:p.id, token:p.token, nickname:p.nickname, role:p.role, roleInfo:info,
     alive:p.alive, isHost:p.id===room.hostId, personalLogs:p.personalLogs,
-    teammates:p.role==='GNOSIA'? room.players.filter(x=>x.role==='GNOSIA'&&x.id!==p.id).map(x=>x.nickname):[],
+    teammates:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.nickname):[],
     actionSubmitted:!!room.nightActions[p.id], voteSubmitted:!!room.votes[p.id],
     privateInvites:room.privateInvites.filter(x=>x.to===p.id&&x.status==='PENDING').map(x=>({id:x.id,from:room.players.find(y=>y.id===x.from)?.nickname})),
     privateSession:room.privateSessions.find(s=>s.members.includes(p.id)&&s.active) || null
@@ -69,7 +69,7 @@ function normalizeConfig(config = {}) {
 function configuredRoles(config) {
   return [
     ...Array(config.gnosia).fill('GNOSIA'),
-    ...SPECIAL_ROLES.filter(role => config[role]).map(role => role.toUpperCase())
+    ...SPECIAL_ROLES.flatMap(role => config[role] ? Array(role === 'guard' ? 2 : 1).fill(role.toUpperCase()) : [])
   ];
 }
 
@@ -144,8 +144,8 @@ io.on('connection',(socket)=>{
 
   socket.on('nightAction',({targetId},cb)=>{
     const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||r.phase!=='NIGHT'||!p.alive)return;
-    if(!['GNOSIA','ENGINEER','GUARD'].includes(p.role)) return cb?.({ok:false,error:'제출할 행동이 없습니다.'});
-    const t=r.players.find(x=>x.id===targetId&&x.alive); if(!t||t.id===p.id&&p.role==='GUARD')return cb?.({ok:false,error:'잘못된 대상입니다.'});
+    if(!['GNOSIA','ENGINEER','ANGEL'].includes(p.role)) return cb?.({ok:false,error:'제출할 행동이 없습니다.'});
+    const t=r.players.find(x=>x.id===targetId&&x.alive); if(!t||t.id===p.id&&p.role==='ANGEL')return cb?.({ok:false,error:'잘못된 대상입니다.'});
     r.nightActions[p.id]={role:p.role,targetId:t.id}; emitRoom(r); cb?.({ok:true});
   });
 
@@ -183,7 +183,7 @@ function resolveNight(r){
   const actions=Object.values(r.nightActions);
   const eng=actions.filter(a=>a.role==='ENGINEER');
   eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);if(target.role==='BUG'){target.alive=false;personal(actor,`${target.nickname}: 버그 소멸`);log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}else personal(actor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`);});
-  const guards=new Set(actions.filter(a=>a.role==='GUARD').map(a=>a.targetId));
+  const guards=new Set(actions.filter(a=>a.role==='ANGEL').map(a=>a.targetId));
   const attacks=actions.filter(a=>a.role==='GNOSIA').map(a=>a.targetId);
   let victim=null;if(attacks.length){const freq={};attacks.forEach(id=>freq[id]=(freq[id]||0)+1);victim=Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];}
   if(victim&&guards.has(victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
