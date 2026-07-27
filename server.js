@@ -53,7 +53,7 @@ function publicState(room){
   return {
     code:room.code, phase:room.phase, day:room.day, hostId:room.hostId,
     players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready,online:!!p.socketId})),
-    config:room.config, logs:room.logs.slice(-80), voteRound:room.voteRound,
+    config:room.config, logs:room.logs.slice(-80), voteHistory:(room.voteHistory||[]).slice(-20), voteRound:room.voteRound,
     submitted:{ votes:Object.keys(room.votes).length, night:Object.keys(room.nightActions).length },
     winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers, voteResult
   };
@@ -70,6 +70,7 @@ function privateState(room,p){
     id:p.id, token:p.token, nickname:p.nickname, role:p.role, roleInfo:info,
     alive:p.alive, isHost:p.id===room.hostId, personalLogs:p.personalLogs,
     teammates:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.nickname):[],
+    teammateIds:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.id):[],
     actionSubmitted:!!room.nightActions[p.id], voteSubmitted:!!room.votes[p.id],
     meetingRooms,
     currentRoom:currentRoom?{...currentRoom,messages:(currentRoomData?.messages||[]).filter(m=>m.seq>messageSince)}:null,
@@ -123,7 +124,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',({nickname},cb)=>{
     let c; do c=code(); while(rooms.has(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,lastVoteResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
+    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},voteRound:1,lastVoteResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -151,7 +152,7 @@ io.on('connection',(socket)=>{
     if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.elimination=null;x.personalLogs=[];});
-    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.lastVoteResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
+    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.lastVoteResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
   socket.on('advancePhase',()=>{
@@ -160,6 +161,7 @@ io.on('connection',(socket)=>{
     else if(r.phase==='DISCUSSION'){r.phase='VOTE';r.votes={};r.lastVoteResult=null;r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
     else if(r.phase==='VOTE_TALLY'){
       const result=r.lastVoteResult;if(!result)return;
+      r.voteHistory.push({...result,day:r.day});
       log(r,`투표 ${result.round}차: ${result.ballots.map(b=>`${b.voterNickname} → ${b.targetNickname}`).join(' / ')}`,'vote');
       if(result.outcome==='COLD_SLEEP')log(r,`${result.candidates.find(c=>c.isTop)?.nickname}이 콜드슬립되었습니다.`,'cold');
       else if(result.outcome==='RETRY')log(r,'최다 득표자가 동률입니다. 재투표를 실시합니다.','vote');
@@ -182,6 +184,7 @@ io.on('connection',(socket)=>{
   socket.on('castVote',({targetId},cb)=>{
     const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||r.phase!=='VOTE'||!p.alive)return;
     const t=r.players.find(x=>x.id===targetId&&x.alive); if(!t)return cb?.({ok:false,error:'대상을 선택할 수 없습니다.'});
+    if(t.id===p.id)return cb?.({ok:false,error:'자신에게는 투표할 수 없습니다.'});
     r.votes[p.id]=t.id; emitRoom(r);
     if(Object.keys(r.votes).length===alive(r).length) resolveVote(r);
     cb?.({ok:true});
@@ -191,6 +194,8 @@ io.on('connection',(socket)=>{
     const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||r.phase!=='NIGHT'||!p.alive)return;
     if(!['GNOSIA','ENGINEER','ANGEL'].includes(p.role)) return cb?.({ok:false,error:'제출할 행동이 없습니다.'});
     const t=r.players.find(x=>x.id===targetId&&x.alive); if(!t||t.id===p.id&&p.role==='ANGEL')return cb?.({ok:false,error:'잘못된 대상입니다.'});
+    if(t.id===p.id&&['GNOSIA','ENGINEER'].includes(p.role))return cb?.({ok:false,error:'자신을 대상으로 지정할 수 없습니다.'});
+    if(p.role==='GNOSIA'&&t.role==='GNOSIA')return cb?.({ok:false,error:'그노시아는 소멸 대상으로 지정할 수 없습니다.'});
     r.nightActions[p.id]={role:p.role,targetId:t.id}; emitRoom(r); cb?.({ok:true});
   });
 

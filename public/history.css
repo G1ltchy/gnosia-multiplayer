@@ -1,0 +1,43 @@
+.voteHistoryList {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.voteHistory {
+  overflow: hidden;
+  border: 1px solid #39d7ff66;
+  border-radius: 12px;
+  background: #071a2d;
+}
+
+.voteHistory summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 15px;
+  color: var(--cyan);
+  cursor: pointer;
+}
+
+.voteHistory summary span {
+  font-weight: 800;
+}
+
+.voteHistory summary b {
+  color: #d9f7ff;
+}
+
+.voteHistory[open] {
+  padding-bottom: 18px;
+  box-shadow: 0 0 18px #27d9ff22;
+}
+
+.voteHistory[open] summary {
+  margin-bottom: 18px;
+  border-bottom: 1px solid #39d7ff44;
+}
+
+.voteHistory .voteBallotGrid {
+  padding: 0 14px;
+}
