@@ -34,12 +34,16 @@ function player(room, socket){ return room.players.find(p=>p.socketId===socket.i
 function host(room){ return room.players.find(p=>p.id===room.hostId); }
 function alive(room){ return room.players.filter(p=>p.alive); }
 function publicState(room){
+  const resultPlayers=room.phase==='GAME_END'?room.players.map(p=>{
+    const info=ROLE_INFO[p.role]||ROLE_INFO.CREW;
+    return {id:p.id,nickname:p.nickname,alive:p.alive,role:p.role,roleLabel:info.label,faction:info.faction,isWinner:info.faction===room.winner};
+  }):undefined;
   return {
     code:room.code, phase:room.phase, day:room.day, hostId:room.hostId,
     players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,ready:p.ready,online:!!p.socketId})),
     config:room.config, logs:room.logs.slice(-80), voteRound:room.voteRound,
     submitted:{ votes:Object.keys(room.votes).length, night:Object.keys(room.nightActions).length },
-    winner:room.winner, privateEndsAt:room.privateEndsAt
+    winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers
   };
 }
 function privateState(room,p){
