@@ -10,6 +10,7 @@ app.use(express.static('public'));
 
 const rooms = new Map();
 const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_RESULT','NIGHT','PRIVATE','NIGHT_RESULT','GAME_END'];
+const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
 
 const ROLE_INFO = {
   CREW: { label:'선원', faction:'CREW', icon:'crew.png', description:'특별한 능력은 없습니다. 토론과 투표로 그노시아를 찾아내세요.' },
@@ -58,6 +59,19 @@ function emitRoom(room){
 }
 function log(room,text,type='info'){ room.logs.push({day:room.day,text,type,time:Date.now()}); }
 function personal(p,text){ p.personalLogs.push({text,time:Date.now()}); }
+function normalizeConfig(config = {}) {
+  const gnosia = Number(config.gnosia);
+  return {
+    gnosia: Number.isInteger(gnosia) ? Math.max(1, Math.min(5, gnosia)) : 1,
+    ...Object.fromEntries(SPECIAL_ROLES.map(role => [role, config[role] === true]))
+  };
+}
+function configuredRoles(config) {
+  return [
+    ...Array(config.gnosia).fill('GNOSIA'),
+    ...SPECIAL_ROLES.filter(role => config[role]).map(role => role.toUpperCase())
+  ];
+}
 
 function winnerCheck(room){
   const living=alive(room);
@@ -73,7 +87,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',({nickname},cb)=>{
     let c; do c=code(); while(rooms.has(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:1,doctor:1,guard:1,ac:0,bug:0,angel:0},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateInvites:[],privateSessions:[],privateEndsAt:null};
+    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],votes:{},voteRound:1,nightActions:{},lastCold:null,winner:null,privateInvites:[],privateSessions:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -92,14 +106,14 @@ io.on('connection',(socket)=>{
   });
 
   socket.on('toggleReady',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||r.phase!=='LOBBY')return; p.ready=!p.ready; emitRoom(r); });
-  socket.on('updateConfig',(cfg)=>{ const r=rooms.get(socket.data.room); const p=player(r,socket); if(!r||!p||p.id!==r.hostId||r.phase!=='LOBBY')return; Object.keys(r.config).forEach(k=>r.config[k]=Math.max(0,Math.min(5,Number(cfg[k]??r.config[k])))); r.config.gnosia=Math.max(1,r.config.gnosia); emitRoom(r); });
+  socket.on('updateConfig',(cfg)=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||p.id!==r.hostId||r.phase!=='LOBBY')return; r.config=normalizeConfig(cfg); emitRoom(r); });
 
   socket.on('startGame',(_,cb)=>{
-    const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||p.id!==r.hostId)return;
-    const counts=r.config; const roles=[];
-    for(const [k,n] of Object.entries(counts)){ const role=k.toUpperCase(); for(let i=0;i<n;i++)roles.push(role); }
+    const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||p.id!==r.hostId)return;
+    r.config=normalizeConfig(r.config);
+    const roles=configuredRoles(r.config);
+    if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
-    if(roles.length!==r.players.length) return cb?.({ok:false,error:`역할 수(${roles.length})와 참가자 수(${r.players.length})가 다릅니다.`});
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.personalLogs=[];});
     r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.votes={};r.nightActions={};r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
