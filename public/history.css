@@ -220,3 +220,56 @@
 .voteTallyScreen .tallyCandidate:not(.top) .voteTarget {
   color: #d8ffff;
 }
+
+.tieVotePanel {
+  text-align: center;
+}
+
+.tieVotePanel > p {
+  color: #cde7f1;
+}
+
+.tieChoices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 22px 0 16px;
+}
+
+.tieChoice {
+  display: grid;
+  gap: 8px;
+  min-height: 120px;
+  padding: 22px 18px;
+  border: 1px solid #39d7ff88;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #0c2d49, #071426);
+  color: white;
+}
+
+.tieChoice strong {
+  color: var(--cyan);
+  font-size: 20px;
+}
+
+.tieChoice span {
+  color: var(--muted);
+}
+
+.tieChoice.all {
+  border-color: #ff668899;
+}
+
+.tieChoice.all strong {
+  color: #ff8ba5;
+}
+
+.tieChoice:hover {
+  filter: brightness(1.15);
+}
+
+@media (max-width: 600px) {
+  .tieChoices {
+    grid-template-columns: 1fr;
+  }
+}

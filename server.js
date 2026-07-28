@@ -16,7 +16,7 @@ app.use(express.static('public', {
 }));
 
 const rooms = new Map();
-const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
+const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
 
 const ROLE_INFO = {
@@ -49,12 +49,15 @@ function publicState(room){
     round:room.lastVoteResult.round,maxVotes:room.lastVoteResult.maxVotes,outcome:room.lastVoteResult.outcome,
     candidates:room.lastVoteResult.candidates
   }:undefined;
+  const tieVote=room.phase==='TIE_VOTE'?{
+    candidates:(room.lastVoteResult?.candidates||[]).filter(c=>c.isTop).map(c=>({id:c.id,nickname:c.nickname}))
+  }:room.phase==='TIE_TALLY'?room.lastTieResult:undefined;
   return {
     code:room.code, phase:room.phase, day:room.day, hostId:room.hostId,
     players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready,online:!!p.socketId})),
     config:room.config, logs:room.logs.slice(-80), voteHistory:(room.voteHistory||[]).slice(-20), voteRound:room.voteRound,
-    submitted:{ votes:Object.keys(room.votes).length, night:Object.keys(room.nightActions).length },
-    winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers, voteResult
+    submitted:{ votes:Object.keys(room.votes).length, tieVotes:Object.keys(room.tieVotes||{}).length, night:Object.keys(room.nightActions).length },
+    winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers, voteResult, tieVote
   };
 }
 function privateState(room,p){
@@ -70,7 +73,7 @@ function privateState(room,p){
     alive:p.alive, isHost:p.id===room.hostId, personalLogs:p.personalLogs,
     teammates:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.nickname):[],
     teammateIds:['GNOSIA','GUARD'].includes(p.role)? room.players.filter(x=>x.role===p.role&&x.id!==p.id).map(x=>x.id):[],
-    actionSubmitted:!!room.nightActions[p.id], voteSubmitted:!!room.votes[p.id],
+    actionSubmitted:!!room.nightActions[p.id], voteSubmitted:!!room.votes[p.id], tieVoteSubmitted:!!room.tieVotes?.[p.id],
     meetingRooms,
     currentRoom:currentRoom?{...currentRoom,messages:(currentRoomData?.messages||[]).filter(m=>m.seq>messageSince)}:null,
     gnosiaMessages:p.role==='GNOSIA'?(room.gnosiaMessages||[]):undefined
@@ -123,7 +126,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',({nickname},cb)=>{
     let c; do c=code(); while(rooms.has(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},voteRound:1,lastVoteResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
+    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},tieVotes:{},voteRound:1,lastVoteResult:null,lastTieResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -151,7 +154,7 @@ io.on('connection',(socket)=>{
     if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.elimination=null;x.personalLogs=[];});
-    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.lastVoteResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
+    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
   socket.on('returnToLobby',(_,cb)=>{
@@ -160,7 +163,7 @@ io.on('connection',(socket)=>{
     if(!p||p.id!==r.hostId)return cb?.({ok:false,error:'방장만 대기 로비로 돌아갈 수 있습니다.'});
     if(r.phase!=='GAME_END')return cb?.({ok:false,error:'게임이 종료된 뒤에만 대기 로비로 돌아갈 수 있습니다.'});
     r.players.forEach(x=>{x.role=null;x.alive=true;x.elimination=null;x.ready=false;x.personalLogs=[];});
-    r.phase='LOBBY';r.day=0;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.voteRound=1;r.lastVoteResult=null;
+    r.phase='LOBBY';r.day=0;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.voteRound=1;r.lastVoteResult=null;r.lastTieResult=null;
     r.nightActions={};r.lastCold=null;r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};
     r.gnosiaMessages=[];r.privateEndsAt=null;
     emitRoom(r);cb?.({ok:true});
@@ -169,16 +172,21 @@ io.on('connection',(socket)=>{
   socket.on('advancePhase',()=>{
     const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||p.id!==r.hostId)return;
     if(r.phase==='ROLE_REVEAL'){r.phase='DISCUSSION';log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
-    else if(r.phase==='DISCUSSION'){r.phase='VOTE';r.votes={};r.lastVoteResult=null;r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
+    else if(r.phase==='DISCUSSION'){r.phase='VOTE';r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
     else if(r.phase==='VOTE_TALLY'){
       const result=r.lastVoteResult;if(!result)return;
       r.voteHistory.push({...result,day:r.day});
       log(r,`투표 ${result.round}차: ${result.ballots.map(b=>`${b.voterNickname} → ${b.targetNickname}`).join(' / ')}`,'vote');
       if(result.outcome==='COLD_SLEEP')log(r,`${result.candidates.find(c=>c.isTop)?.nickname}이 콜드슬립되었습니다.`,'cold');
-      else if(result.outcome==='RETRY')log(r,'최다 득표자가 동률입니다. 재투표를 실시합니다.','vote');
-      else log(r,'3차 투표도 동률이므로 누구도 콜드슬립되지 않습니다.','vote');
-      if(result.outcome==='RETRY'){r.voteRound++;r.votes={};r.lastVoteResult=null;r.phase='VOTE';log(r,`${r.voteRound}차 재투표를 시작합니다.`,'vote');}
+      else log(r,'최다 득표자가 동률입니다. 동률 후보 전원의 콜드슬립 여부를 투표합니다.','vote');
+      if(result.outcome==='TIE'){r.tieVotes={};r.lastTieResult=null;r.phase='TIE_VOTE';log(r,'동률 의견 투표를 시작합니다.','vote');}
       else if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
+      else {r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
+    } else if(r.phase==='TIE_TALLY'){
+      const result=r.lastTieResult;if(!result)return;
+      log(r,`동률 의견 투표: 모두 콜드슬립 ${result.allCount}표 / 모두 콜드슬립 안 함 ${result.noneCount}표`,'vote');
+      log(r,result.decision==='ALL'?'동률 후보 전원이 콜드슬립되었습니다.':'동률 후보 전원을 콜드슬립시키지 않습니다.','cold');
+      if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
       else {r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
     } else if(r.phase==='NIGHT'){ resolveNight(r); }
     else if(r.phase==='PRIVATE'){ endPrivate(r); }
@@ -195,6 +203,15 @@ io.on('connection',(socket)=>{
     if(t.id===p.id)return cb?.({ok:false,error:'자신에게는 투표할 수 없습니다.'});
     r.votes[p.id]=t.id; emitRoom(r);
     if(Object.keys(r.votes).length===alive(r).length) resolveVote(r);
+    cb?.({ok:true});
+  });
+
+  socket.on('castTieVote',({choice},cb)=>{
+    const r=rooms.get(socket.data.room), p=player(r,socket);
+    if(!r||!p||r.phase!=='TIE_VOTE'||!p.alive)return cb?.({ok:false,error:'지금은 동률 의견 투표를 할 수 없습니다.'});
+    if(!['ALL','NONE'].includes(choice))return cb?.({ok:false,error:'잘못된 의견입니다.'});
+    r.tieVotes[p.id]=choice;emitRoom(r);
+    if(Object.keys(r.tieVotes).length===alive(r).length)resolveTieVote(r);
     cb?.({ok:true});
   });
 
@@ -237,7 +254,7 @@ function resolveVote(r){
   const counts={};Object.values(r.votes).forEach(id=>counts[id]=(counts[id]||0)+1);
   const max=Math.max(...Object.values(counts));const tied=Object.keys(counts).filter(id=>counts[id]===max);
   const voters=alive(r);
-  const outcome=tied.length>1?(r.voteRound<3?'RETRY':'NO_ELIMINATION'):'COLD_SLEEP';
+  const outcome=tied.length>1?'TIE':'COLD_SLEEP';
   r.lastVoteResult={
     round:r.voteRound,maxVotes:max,outcome,
     candidates:voters.map(p=>({id:p.id,nickname:p.nickname,votes:counts[p.id]||0,isTop:(counts[p.id]||0)===max})),
@@ -247,6 +264,26 @@ function resolveVote(r){
   else {const t=r.players.find(x=>x.id===tied[0]);t.alive=false;t.elimination='COLD_SLEEP';r.lastCold=t.id;}
   if(r.lastCold){r.players.filter(x=>x.role==='DOCTOR'&&x.alive).forEach(d=>personal(d,`${r.players.find(x=>x.id===r.lastCold).nickname}: ${r.players.find(x=>x.id===r.lastCold).role==='GNOSIA'?'그노시아':'인간'}`));}
   r.phase='VOTE_TALLY';emitRoom(r);
+}
+
+function resolveTieVote(r){
+  const allCount=Object.values(r.tieVotes).filter(choice=>choice==='ALL').length;
+  const noneCount=Object.values(r.tieVotes).filter(choice=>choice==='NONE').length;
+  const decision=allCount>noneCount?'ALL':'NONE';
+  const candidates=(r.lastVoteResult?.candidates||[]).filter(c=>c.isTop);
+  if(decision==='ALL'){
+    const slept=[];
+    candidates.forEach(candidate=>{
+      const target=r.players.find(p=>p.id===candidate.id&&p.alive);
+      if(target){target.alive=false;target.elimination='COLD_SLEEP';slept.push(target);}
+    });
+    r.lastCold=slept[0]?.id||null;
+    r.players.filter(p=>p.role==='DOCTOR'&&p.alive).forEach(doctor=>{
+      slept.forEach(target=>personal(doctor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`));
+    });
+  }else r.lastCold=null;
+  r.lastTieResult={allCount,noneCount,decision,candidates:candidates.map(c=>({id:c.id,nickname:c.nickname}))};
+  r.phase='TIE_TALLY';emitRoom(r);
 }
 
 function resolveNight(r){
