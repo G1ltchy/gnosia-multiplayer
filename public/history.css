@@ -41,3 +41,9 @@
 .voteHistory .voteBallotGrid {
   padding: 0 14px;
 }
+
+.resultActions {
+  display: flex;
+  justify-content: center;
+  margin-top: 28px;
+}

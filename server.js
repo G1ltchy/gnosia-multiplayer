@@ -155,6 +155,18 @@ io.on('connection',(socket)=>{
     r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.lastVoteResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
+  socket.on('returnToLobby',(_,cb)=>{
+    const r=rooms.get(socket.data.room); if(!r)return cb?.({ok:false,error:'방을 찾을 수 없습니다.'});
+    const p=player(r,socket);
+    if(!p||p.id!==r.hostId)return cb?.({ok:false,error:'방장만 대기 로비로 돌아갈 수 있습니다.'});
+    if(r.phase!=='GAME_END')return cb?.({ok:false,error:'게임이 종료된 뒤에만 대기 로비로 돌아갈 수 있습니다.'});
+    r.players.forEach(x=>{x.role=null;x.alive=true;x.elimination=null;x.ready=false;x.personalLogs=[];});
+    r.phase='LOBBY';r.day=0;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.voteRound=1;r.lastVoteResult=null;
+    r.nightActions={};r.lastCold=null;r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};
+    r.gnosiaMessages=[];r.privateEndsAt=null;
+    emitRoom(r);cb?.({ok:true});
+  });
+
   socket.on('advancePhase',()=>{
     const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||p.id!==r.hostId)return;
     if(r.phase==='ROLE_REVEAL'){r.phase='DISCUSSION';log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
