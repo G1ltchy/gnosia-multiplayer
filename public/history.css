@@ -199,3 +199,24 @@
   font-size: 13px;
   line-height: 1.45;
 }
+
+.voteTallyScreen .tallyCandidate.top .resultName,
+.voteTallyScreen .tallyCandidate.top .voteTarget {
+  color: #ffe283;
+}
+
+.voteTallyScreen .tallyCandidate.top .voteMark {
+  border-color: var(--gold);
+  background: linear-gradient(135deg, #70521b, #2f260f);
+  color: #ffe283;
+  filter: drop-shadow(0 0 9px #ffc94b77);
+}
+
+.voteTallyScreen .voteTarget {
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.voteTallyScreen .tallyCandidate:not(.top) .voteTarget {
+  color: #d8ffff;
+}

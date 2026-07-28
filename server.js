@@ -16,7 +16,7 @@ app.use(express.static('public', {
 }));
 
 const rooms = new Map();
-const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','VOTE_RESULT','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
+const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
 
 const ROLE_INFO = {
@@ -45,10 +45,9 @@ function publicState(room){
     const info=ROLE_INFO[p.role]||ROLE_INFO.CREW;
     return {id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,role:p.role,roleLabel:info.label,faction:info.faction,isWinner:info.faction===room.winner};
   }):undefined;
-  const voteResult=room.lastVoteResult&&['VOTE_TALLY','VOTE_RESULT'].includes(room.phase)?{
+  const voteResult=room.lastVoteResult&&room.phase==='VOTE_TALLY'?{
     round:room.lastVoteResult.round,maxVotes:room.lastVoteResult.maxVotes,outcome:room.lastVoteResult.outcome,
-    candidates:room.lastVoteResult.candidates,
-    ...(room.phase==='VOTE_RESULT'?{ballots:room.lastVoteResult.ballots}: {})
+    candidates:room.lastVoteResult.candidates
   }:undefined;
   return {
     code:room.code, phase:room.phase, day:room.day, hostId:room.hostId,
@@ -178,10 +177,7 @@ io.on('connection',(socket)=>{
       if(result.outcome==='COLD_SLEEP')log(r,`${result.candidates.find(c=>c.isTop)?.nickname}이 콜드슬립되었습니다.`,'cold');
       else if(result.outcome==='RETRY')log(r,'최다 득표자가 동률입니다. 재투표를 실시합니다.','vote');
       else log(r,'3차 투표도 동률이므로 누구도 콜드슬립되지 않습니다.','vote');
-      r.phase='VOTE_RESULT';
-    }
-    else if(r.phase==='VOTE_RESULT'){
-      if(r.lastVoteResult?.outcome==='RETRY'){r.voteRound++;r.votes={};r.lastVoteResult=null;r.phase='VOTE';log(r,`${r.voteRound}차 재투표를 시작합니다.`,'vote');}
+      if(result.outcome==='RETRY'){r.voteRound++;r.votes={};r.lastVoteResult=null;r.phase='VOTE';log(r,`${r.voteRound}차 재투표를 시작합니다.`,'vote');}
       else if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
       else {r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
     } else if(r.phase==='NIGHT'){ resolveNight(r); }
