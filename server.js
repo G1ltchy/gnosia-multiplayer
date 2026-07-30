@@ -259,8 +259,12 @@ io.on('connection',(socket)=>{
     emitRoom(r);cb?.({ok:true});
   });
 
-  socket.on('advancePhase',()=>{
-    const r=rooms.get(socket.data.room), p=player(r,socket); if(!r||!p||p.id!==r.hostId)return;
+  socket.on('advancePhase',({expectedPhase}={},cb)=>{
+    const r=rooms.get(socket.data.room), p=player(r,socket);
+    if(!r||!p||p.id!==r.hostId)return cb?.({ok:false,error:'방장만 단계를 진행할 수 있습니다.'});
+    if(!PHASES.includes(expectedPhase)||r.phase!==expectedPhase){
+      return cb?.({ok:false,error:'이미 다음 단계로 진행되었습니다.'});
+    }
     if(r.phase==='ROLE_REVEAL'){r.phase='DISCUSSION';log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
     else if(r.phase==='DISCUSSION'){r.phase='VOTE';r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
     else if(r.phase==='VOTE_TALLY'){
@@ -284,7 +288,7 @@ io.on('connection',(socket)=>{
       if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
       else {r.day++;r.phase='DISCUSSION';log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
     }
-    emitRoom(r);
+    emitRoom(r);cb?.({ok:true});
   });
 
   socket.on('castVote',({targetId},cb)=>{
