@@ -2,10 +2,23 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const crypto = require('crypto');
+const { createClient } = require('redis');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
+const ROOM_TTL_SECONDS = Math.max(3600, Number(process.env.ROOM_TTL_SECONDS) || 604800);
+let redisClient = null;
+let storageReady = !process.env.REDIS_URL;
+
+app.get('/health', (_req, res) => {
+  const ok = !process.env.REDIS_URL || storageReady;
+  res.status(ok ? 200 : 503).json({
+    ok,
+    storage: process.env.REDIS_URL ? (storageReady ? 'redis' : 'unavailable') : 'memory',
+    rooms: rooms.size
+  });
+});
 app.use(express.static('public', {
   cacheControl: false,
   setHeaders(res, filePath) {
@@ -18,6 +31,82 @@ app.use(express.static('public', {
 const rooms = new Map();
 const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
+
+function roomKey(roomCode) {
+  return `gnosia:room:${roomCode}`;
+}
+
+function storedRoom(room) {
+  const copy = JSON.parse(JSON.stringify(room));
+  copy.players.forEach(p => { p.socketId = null; });
+  return copy;
+}
+
+async function persistRoom(room) {
+  if (!redisClient?.isReady) return;
+  try {
+    await redisClient.set(roomKey(room.code), JSON.stringify(storedRoom(room)), { EX: ROOM_TTL_SECONDS });
+  } catch (error) {
+    console.error(`Failed to persist room ${room.code}:`, error.message);
+  }
+}
+
+function restoreRoom(room) {
+  room.players = Array.isArray(room.players) ? room.players : [];
+  room.players.forEach(p => {
+    p.socketId = null;
+    p.personalLogs = Array.isArray(p.personalLogs) ? p.personalLogs : [];
+  });
+  room.logs = Array.isArray(room.logs) ? room.logs : [];
+  room.voteHistory = Array.isArray(room.voteHistory) ? room.voteHistory : [];
+  room.votes ||= {};
+  room.tieVotes ||= {};
+  room.nightActions ||= {};
+  room.privateRooms = Array.isArray(room.privateRooms) ? room.privateRooms : [];
+  room.privateLocations ||= {};
+  room.privateMessageSince ||= {};
+  room.gnosiaMessages = Array.isArray(room.gnosiaMessages) ? room.gnosiaMessages : [];
+  room.config = normalizeConfig(room.config);
+  return room;
+}
+
+async function getRoom(roomCode) {
+  if (rooms.has(roomCode)) return rooms.get(roomCode);
+  if (!redisClient?.isReady) return null;
+  try {
+    const data = await redisClient.get(roomKey(roomCode));
+    if (!data) return null;
+    const room = restoreRoom(JSON.parse(data));
+    rooms.set(roomCode, room);
+    return room;
+  } catch (error) {
+    console.error(`Failed to restore room ${roomCode}:`, error.message);
+    return null;
+  }
+}
+
+async function roomExists(roomCode) {
+  if (rooms.has(roomCode)) return true;
+  if (!redisClient?.isReady) return false;
+  return (await redisClient.exists(roomKey(roomCode))) === 1;
+}
+
+async function connectStorage() {
+  if (!process.env.REDIS_URL) {
+    console.warn('REDIS_URL is not set; room state will not survive a restart.');
+    return;
+  }
+  redisClient = createClient({ url: process.env.REDIS_URL });
+  redisClient.on('error', error => {
+    storageReady = false;
+    console.error('Redis error:', error.message);
+  });
+  redisClient.on('ready', () => { storageReady = true; });
+  redisClient.on('end', () => { storageReady = false; });
+  await redisClient.connect();
+  storageReady = true;
+  console.log('Redis room storage connected.');
+}
 
 const ROLE_INFO = {
   CREW: { label:'선원', faction:'CREW', icon:'crew.png', description:'특별한 능력은 없습니다. 토론과 투표로 그노시아를 찾아내세요.' },
@@ -82,6 +171,7 @@ function privateState(room,p){
 function emitRoom(room){
   io.to(room.code).emit('state',publicState(room));
   room.players.forEach(p=>{ if(p.socketId) io.to(p.socketId).emit('privateState',privateState(room,p)); });
+  void persistRoom(room);
 }
 function log(room,text,type='info'){ room.logs.push({day:room.day,text,type,time:Date.now()}); }
 function personal(p,text){ p.personalLogs.push({text,time:Date.now()}); }
@@ -123,16 +213,16 @@ function winnerCheck(room){
 }
 
 io.on('connection',(socket)=>{
-  socket.on('createRoom',({nickname},cb)=>{
-    let c; do c=code(); while(rooms.has(c));
+  socket.on('createRoom',async ({nickname},cb)=>{
+    let c; do c=code(); while(await roomExists(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
     const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},tieVotes:{},voteRound:1,lastVoteResult:null,lastTieResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
 
-  socket.on('joinRoom',({code:raw,nickname,token:resumeToken},cb)=>{
-    const c=String(raw||'').toUpperCase(); const room=rooms.get(c); if(!room) return cb?.({ok:false,error:'방을 찾을 수 없습니다.'});
+  socket.on('joinRoom',async ({code:raw,nickname,token:resumeToken},cb)=>{
+    const c=String(raw||'').toUpperCase(); const room=await getRoom(c); if(!room) return cb?.({ok:false,error:'방을 찾을 수 없습니다.'});
     let p=resumeToken?room.players.find(x=>x.token===resumeToken):null;
     if(p){ p.socketId=socket.id; }
     else {
@@ -301,4 +391,23 @@ function resolveNight(r){
 function endPrivate(r){ r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.privateEndsAt=null;r.nightActions={};r.phase='NIGHT';log(r,'밀회가 종료되고 밤이 되었습니다. 역할 행동을 제출하세요.','night'); }
 
 const PORT=process.env.PORT||3000;
-server.listen(PORT,'0.0.0.0',()=>console.log(`GNOSIA moderator running on http://localhost:${PORT}`));
+async function start() {
+  await connectStorage();
+  server.listen(PORT,'0.0.0.0',()=>console.log(`GNOSIA moderator running on http://localhost:${PORT}`));
+}
+
+async function shutdown(signal) {
+  console.log(`${signal} received; saving rooms before shutdown.`);
+  await Promise.all([...rooms.values()].map(persistRoom));
+  await new Promise(resolve => io.close(resolve));
+  if (redisClient?.isOpen) await redisClient.quit();
+  process.exit(0);
+}
+
+process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.once('SIGINT', () => { void shutdown('SIGINT'); });
+
+start().catch(error => {
+  console.error('Server startup failed:', error);
+  process.exit(1);
+});

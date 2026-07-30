@@ -9,10 +9,11 @@
     "dev": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "24.x"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "redis": "^5.8.2",
     "socket.io": "^4.8.1"
   }
 }
