@@ -130,6 +130,8 @@ function player(room, socket){ return room.players.find(p=>p.socketId===socket.i
 function host(room){ return room.players.find(p=>p.id===room.hostId); }
 function alive(room){ return room.players.filter(p=>p.alive); }
 function canGnosiaEliminate(target){ return !!target?.alive&&!['GNOSIA','BUG'].includes(target.role); }
+function engineerInspection(target){ return {result:target?.role==='GNOSIA'?'그노시아':'인간',eliminates:target?.role==='BUG'}; }
+function isAngelProtecting(actions,targetId){ return actions.some(a=>a.role==='ANGEL'&&a.targetId===targetId); }
 function publicState(room){
   const resultPlayers=room.phase==='GAME_END'?room.players.map(p=>{
     const info=ROLE_INFO[p.role]||ROLE_INFO.CREW;
@@ -418,11 +420,10 @@ function resolveTieVote(r){
 function resolveNight(r){
   const actions=Object.values(r.nightActions);
   const eng=actions.filter(a=>a.role==='ENGINEER');
-  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);if(target.role==='BUG'){target.alive=false;target.elimination='VANISHED';personal(actor,`${target.nickname}: 버그 소멸`,r.day);log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}else personal(actor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`,r.day);});
-  const guards=new Set(actions.filter(a=>a.role==='ANGEL').map(a=>a.targetId));
+  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);const inspection=engineerInspection(target);if(inspection.eliminates){target.alive=false;target.elimination='VANISHED';log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}personal(actor,`${target.nickname}: ${inspection.result}`,r.day);});
   const attacks=actions.filter(a=>a.role==='GNOSIA').map(a=>a.targetId);
   let victim=null;if(attacks.length){const freq={};attacks.forEach(id=>freq[id]=(freq[id]||0)+1);victim=Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];}
-  if(victim&&guards.has(victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
+  if(victim&&isAngelProtecting(actions,victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   else if(victim){const v=r.players.find(x=>x.id===victim);if(canGnosiaEliminate(v)){v.alive=false;v.elimination='VANISHED';log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
   else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   r.phase='NIGHT_RESULT';log(r,'밤의 결과가 공개되었습니다.','night');emitRoom(r);
@@ -453,4 +454,4 @@ if(require.main===module){
   });
 }
 
-module.exports={canGnosiaEliminate};
+module.exports={canGnosiaEliminate,engineerInspection,isAngelProtecting,resolveNight};
