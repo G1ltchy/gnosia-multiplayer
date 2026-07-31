@@ -129,6 +129,7 @@ function shuffle(a){ a=[...a]; for(let i=a.length-1;i>0;i--){ const j=Math.floor
 function player(room, socket){ return room.players.find(p=>p.socketId===socket.id); }
 function host(room){ return room.players.find(p=>p.id===room.hostId); }
 function alive(room){ return room.players.filter(p=>p.alive); }
+function canGnosiaEliminate(target){ return !!target?.alive&&!['GNOSIA','BUG'].includes(target.role); }
 function publicState(room){
   const resultPlayers=room.phase==='GAME_END'?room.players.map(p=>{
     const info=ROLE_INFO[p.role]||ROLE_INFO.CREW;
@@ -422,7 +423,7 @@ function resolveNight(r){
   const attacks=actions.filter(a=>a.role==='GNOSIA').map(a=>a.targetId);
   let victim=null;if(attacks.length){const freq={};attacks.forEach(id=>freq[id]=(freq[id]||0)+1);victim=Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];}
   if(victim&&guards.has(victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
-  else if(victim){const v=r.players.find(x=>x.id===victim);if(v&&v.alive&&v.role!=='GNOSIA'){v.alive=false;v.elimination='VANISHED';log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
+  else if(victim){const v=r.players.find(x=>x.id===victim);if(canGnosiaEliminate(v)){v.alive=false;v.elimination='VANISHED';log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
   else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   r.phase='NIGHT_RESULT';log(r,'밤의 결과가 공개되었습니다.','night');emitRoom(r);
 }
@@ -445,7 +446,11 @@ async function shutdown(signal) {
 process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
 process.once('SIGINT', () => { void shutdown('SIGINT'); });
 
-start().catch(error => {
-  console.error('Server startup failed:', error);
-  process.exit(1);
-});
+if(require.main===module){
+  start().catch(error => {
+    console.error('Server startup failed:', error);
+    process.exit(1);
+  });
+}
+
+module.exports={canGnosiaEliminate};
