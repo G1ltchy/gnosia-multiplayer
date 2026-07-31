@@ -174,7 +174,7 @@ function emitRoom(room){
   void persistRoom(room);
 }
 function log(room,text,type='info'){ room.logs.push({day:room.day,text,type,time:Date.now()}); }
-function personal(p,text){ p.personalLogs.push({text,time:Date.now()}); }
+function personal(p,text,day){ p.personalLogs.push({text,day,time:Date.now()}); }
 function normalizeConfig(config = {}) {
   const gnosia = Number(config.gnosia);
   return {
@@ -232,6 +232,34 @@ io.on('connection',(socket)=>{
       room.players.push(p); log(room,`${p.nickname}이 참가했습니다.`);
     }
     socket.join(c); socket.data.room=c; socket.data.player=p.id; emitRoom(room); cb?.({ok:true,code:c,token:p.token});
+  });
+
+  socket.on('leaveRoom',async (_,cb)=>{
+    const r=rooms.get(socket.data.room);
+    const p=r?.players.find(x=>x.id===socket.data.player&&x.socketId===socket.id);
+    if(!r||!p){
+      if(r)socket.leave(r.code);
+      socket.data.room=null;
+      socket.data.player=null;
+      return cb?.({ok:true});
+    }
+
+    p.socketId=null;
+    socket.leave(r.code);
+    socket.data.room=null;
+    socket.data.player=null;
+
+    if(r.phase==='LOBBY')r.players=r.players.filter(x=>x.id!==p.id);
+    if(r.hostId===p.id&&r.players.length){
+      r.hostId=(r.players.find(x=>x.id!==p.id&&x.socketId)||r.players.find(x=>x.id!==p.id)||p).id;
+    }
+    if(!r.players.length){
+      rooms.delete(r.code);
+      if(redisClient?.isReady){
+        try{await redisClient.del(roomKey(r.code));}catch(error){console.error(`Failed to remove room ${r.code}:`,error.message);}
+      }
+    }else emitRoom(r);
+    cb?.({ok:true});
   });
 
   socket.on('toggleReady',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||r.phase!=='LOBBY')return; p.ready=!p.ready; emitRoom(r); });
@@ -333,15 +361,21 @@ io.on('connection',(socket)=>{
   socket.on('privateMessage',({text})=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return;
     const current=r.privateRooms.find(x=>x.id===r.privateLocations[p.id]);const message=String(text||'').trim().slice(0,500);if(!current||!message)return;
-    current.messages.push({seq:++r.privateMessageSeq,from:p.id,nickname:p.nickname,text:message,time:Date.now()});current.messages=current.messages.slice(-100);emitRoom(r);
+    const msg={seq:++r.privateMessageSeq,from:p.id,nickname:p.nickname,text:message,time:Date.now()};
+    current.messages.push(msg);current.messages=current.messages.slice(-100);
+    r.players.filter(x=>r.privateLocations[x.id]===current.id&&x.socketId).forEach(x=>io.to(x.socketId).emit('privateMessage',{roomId:current.id,message:msg}));
+    void persistRoom(r);
   });
   socket.on('gnosiaMessage',({text})=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive||p.role!=='GNOSIA')return;
     const message=String(text||'').trim().slice(0,500);if(!message)return;
-    r.gnosiaMessages.push({from:p.id,nickname:p.nickname,text:message,time:Date.now()});r.gnosiaMessages=r.gnosiaMessages.slice(-100);emitRoom(r);
+    const msg={from:p.id,nickname:p.nickname,text:message,time:Date.now()};
+    r.gnosiaMessages.push(msg);r.gnosiaMessages=r.gnosiaMessages.slice(-100);
+    r.players.filter(x=>x.role==='GNOSIA'&&x.socketId).forEach(x=>io.to(x.socketId).emit('gnosiaMessage',{message:msg}));
+    void persistRoom(r);
   });
 
-  socket.on('disconnect',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=r.players.find(x=>x.id===socket.data.player);if(p)p.socketId=null;emitRoom(r); });
+  socket.on('disconnect',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=r.players.find(x=>x.id===socket.data.player);if(p?.socketId===socket.id){p.socketId=null;emitRoom(r);} });
 });
 
 function resolveVote(r){
@@ -356,7 +390,7 @@ function resolveVote(r){
   };
   if(tied.length>1)r.lastCold=null;
   else {const t=r.players.find(x=>x.id===tied[0]);t.alive=false;t.elimination='COLD_SLEEP';r.lastCold=t.id;}
-  if(r.lastCold){r.players.filter(x=>x.role==='DOCTOR'&&x.alive).forEach(d=>personal(d,`${r.players.find(x=>x.id===r.lastCold).nickname}: ${r.players.find(x=>x.id===r.lastCold).role==='GNOSIA'?'그노시아':'인간'}`));}
+  if(r.lastCold){r.players.filter(x=>x.role==='DOCTOR'&&x.alive).forEach(d=>personal(d,`${r.players.find(x=>x.id===r.lastCold).nickname}: ${r.players.find(x=>x.id===r.lastCold).role==='GNOSIA'?'그노시아':'인간'}`,r.day));}
   r.phase='VOTE_TALLY';emitRoom(r);
 }
 
@@ -373,7 +407,7 @@ function resolveTieVote(r){
     });
     r.lastCold=slept[0]?.id||null;
     r.players.filter(p=>p.role==='DOCTOR'&&p.alive).forEach(doctor=>{
-      slept.forEach(target=>personal(doctor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`));
+      slept.forEach(target=>personal(doctor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`,r.day));
     });
   }else r.lastCold=null;
   r.lastTieResult={allCount,noneCount,decision,candidates:candidates.map(c=>({id:c.id,nickname:c.nickname}))};
@@ -383,7 +417,7 @@ function resolveTieVote(r){
 function resolveNight(r){
   const actions=Object.values(r.nightActions);
   const eng=actions.filter(a=>a.role==='ENGINEER');
-  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);if(target.role==='BUG'){target.alive=false;target.elimination='VANISHED';personal(actor,`${target.nickname}: 버그 소멸`);log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}else personal(actor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`);});
+  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);if(target.role==='BUG'){target.alive=false;target.elimination='VANISHED';personal(actor,`${target.nickname}: 버그 소멸`,r.day);log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}else personal(actor,`${target.nickname}: ${target.role==='GNOSIA'?'그노시아':'인간'}`,r.day);});
   const guards=new Set(actions.filter(a=>a.role==='ANGEL').map(a=>a.targetId));
   const attacks=actions.filter(a=>a.role==='GNOSIA').map(a=>a.targetId);
   let victim=null;if(attacks.length){const freq={};attacks.forEach(id=>freq[id]=(freq[id]||0)+1);victim=Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];}
