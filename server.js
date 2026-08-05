@@ -31,8 +31,11 @@ app.use(express.static('public', {
 const rooms = new Map();
 const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
+const TIMER_PHASES = ['ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT'];
+const DEFAULT_TIMERS = {ROLE_REVEAL:60,DISCUSSION:300,VOTE:120,VOTE_TALLY:30,TIE_VOTE:60,TIE_TALLY:30,PRIVATE:180,NIGHT:120,NIGHT_RESULT:45};
 const HOST_RECONNECT_GRACE_MS = 30000;
 const hostTransferTimers = new Map();
+const phaseTimers = new Map();
 
 function roomKey(roomCode) {
   return `gnosia:room:${roomCode}`;
@@ -70,6 +73,7 @@ function restoreRoom(room) {
   room.gnosiaMessages = Array.isArray(room.gnosiaMessages) ? room.gnosiaMessages : [];
   room.hostDisconnectedAt ||= null;
   room.config = normalizeConfig(room.config);
+  if(!TIMER_PHASES.includes(room.phase))room.phaseEndsAt=null;
   return room;
 }
 
@@ -81,6 +85,7 @@ async function getRoom(roomCode) {
     if (!data) return null;
     const room = restoreRoom(JSON.parse(data));
     rooms.set(roomCode, room);
+    restorePhaseTimer(room);
     return room;
   } catch (error) {
     console.error(`Failed to restore room ${roomCode}:`, error.message);
@@ -173,7 +178,7 @@ function publicState(room){
     players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready})),
     config:room.config, logs:room.logs.slice(-80), voteHistory:(room.voteHistory||[]).slice(-20), voteRound:room.voteRound,
     submitted:{ votes:Object.keys(room.votes).length, tieVotes:Object.keys(room.tieVotes||{}).length, night:Object.keys(room.nightActions).length },
-    winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers, voteResult, tieVote
+    winner:room.winner, phaseEndsAt:room.phaseEndsAt||null, serverNow:Date.now(), resultPlayers, voteResult, tieVote
   };
 }
 function privateState(room,p){
@@ -208,9 +213,16 @@ function log(room,text,type='info'){ room.logs.push({day:room.day,text,type,time
 function personal(p,text,day){ p.personalLogs.push({text,day,time:Date.now()}); }
 function normalizeConfig(config = {}) {
   const gnosia = Number(config.gnosia);
+  const suppliedTimers=config.timers&&typeof config.timers==='object'?config.timers:{};
   return {
     gnosia: Number.isInteger(gnosia) ? Math.max(1, Math.min(5, gnosia)) : 1,
-    ...Object.fromEntries(SPECIAL_ROLES.map(role => [role, config[role] === true]))
+    ...Object.fromEntries(SPECIAL_ROLES.map(role => [role, config[role] === true])),
+    timers:Object.fromEntries(TIMER_PHASES.map(phase=>{
+      const supplied=suppliedTimers[phase]&&typeof suppliedTimers[phase]==='object'?suppliedTimers[phase]:{};
+      const seconds=Number(supplied.seconds);
+      const normalizedSeconds=Number.isFinite(seconds)?Math.max(0,Math.min(3600,Math.round(seconds))):DEFAULT_TIMERS[phase];
+      return [phase,{seconds:normalizedSeconds,auto:normalizedSeconds>0&&supplied.auto===true}];
+    }))
   };
 }
 function configuredRoles(config) {
@@ -233,6 +245,40 @@ function setupPrivateRooms(room) {
   room.gnosiaMessages=[];
 }
 
+function cancelPhaseTimer(roomCode){
+  const timer=phaseTimers.get(roomCode);
+  if(timer)clearTimeout(timer);
+  phaseTimers.delete(roomCode);
+}
+function schedulePhaseTimer(room){
+  cancelPhaseTimer(room.code);
+  const setting=room.config?.timers?.[room.phase];
+  if(!setting?.auto||!room.phaseEndsAt)return;
+  const expectedPhase=room.phase;
+  const timer=setTimeout(()=>{
+    phaseTimers.delete(room.code);
+    const current=rooms.get(room.code);
+    if(!current||current.phase!==expectedPhase||current.phaseEndsAt!==room.phaseEndsAt)return;
+    advanceRoom(current,expectedPhase,{forced:true,automatic:true});
+  },Math.max(0,room.phaseEndsAt-Date.now()));
+  timer.unref?.();phaseTimers.set(room.code,timer);
+}
+function enterPhase(room,phase){
+  room.phase=phase;cancelPhaseTimer(room.code);
+  const seconds=room.config?.timers?.[phase]?.seconds||0;
+  room.phaseEndsAt=seconds>0?Date.now()+seconds*1000:null;
+  room.privateEndsAt=phase==='PRIVATE'?room.phaseEndsAt:null;
+  schedulePhaseTimer(room);
+}
+function restorePhaseTimer(room){
+  if(!TIMER_PHASES.includes(room.phase)){room.phaseEndsAt=null;return;}
+  const seconds=room.config?.timers?.[room.phase]?.seconds||0;
+  if(seconds>0&&!room.phaseEndsAt)room.phaseEndsAt=Date.now()+seconds*1000;
+  if(seconds===0)room.phaseEndsAt=null;
+  room.privateEndsAt=room.phase==='PRIVATE'?room.phaseEndsAt:null;
+  schedulePhaseTimer(room);
+}
+
 function winnerCheck(room){
   const living=alive(room);
   const bug=living.find(p=>p.role==='BUG');
@@ -247,7 +293,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',async ({nickname},cb)=>{
     let c; do c=code(); while(await roomExists(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,hostDisconnectedAt:null,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},tieVotes:{},voteRound:1,lastVoteResult:null,lastTieResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
+    const room={code:c,hostId:p.id,hostDisconnectedAt:null,players:[p],phase:'LOBBY',phaseEndsAt:null,day:0,config:normalizeConfig({gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false}),logs:[],voteHistory:[],votes:{},tieVotes:{},voteRound:1,lastVoteResult:null,lastTieResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -303,6 +349,9 @@ io.on('connection',(socket)=>{
 
   socket.on('toggleReady',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||r.phase!=='LOBBY')return; p.ready=!p.ready; emitRoom(r); });
   socket.on('updateConfig',(cfg)=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||p.id!==r.hostId||r.phase!=='LOBBY')return; r.config=normalizeConfig(cfg); emitRoom(r); });
+  socket.on('updateGnosiaConfig',({gnosia}={})=>{const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||p.id!==r.hostId||r.phase!=='LOBBY')return;r.config=normalizeConfig({...r.config,gnosia});emitRoom(r);});
+  socket.on('updateRoleConfig',({role,enabled}={})=>{const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||p.id!==r.hostId||r.phase!=='LOBBY'||!SPECIAL_ROLES.includes(role))return;r.config=normalizeConfig({...r.config,[role]:enabled===true});emitRoom(r);});
+  socket.on('updateTimerConfig',({phase,patch}={})=>{const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||p.id!==r.hostId||r.phase!=='LOBBY'||!TIMER_PHASES.includes(phase)||!patch||typeof patch!=='object')return;const current=r.config.timers?.[phase]||{seconds:DEFAULT_TIMERS[phase],auto:false};r.config=normalizeConfig({...r.config,timers:{...r.config.timers,[phase]:{...current,...patch}}});emitRoom(r);});
 
   socket.on('startGame',(_,cb)=>{
     const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||p.id!==r.hostId)return;
@@ -311,7 +360,7 @@ io.on('connection',(socket)=>{
     if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
     while(roles.length<r.players.length) roles.push('CREW');
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.elimination=null;x.personalLogs=[];});
-    r.phase='ROLE_REVEAL';r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
+    enterPhase(r,'ROLE_REVEAL');r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
   socket.on('returnToLobby',(_,cb)=>{
@@ -320,7 +369,7 @@ io.on('connection',(socket)=>{
     if(!p||p.id!==r.hostId)return cb?.({ok:false,error:'방장만 대기 로비로 돌아갈 수 있습니다.'});
     if(r.phase!=='GAME_END')return cb?.({ok:false,error:'게임이 종료된 뒤에만 대기 로비로 돌아갈 수 있습니다.'});
     r.players.forEach(x=>{x.role=null;x.alive=true;x.elimination=null;x.ready=false;x.personalLogs=[];});
-    r.phase='LOBBY';r.day=0;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.voteRound=1;r.lastVoteResult=null;r.lastTieResult=null;
+    cancelPhaseTimer(r.code);r.phase='LOBBY';r.phaseEndsAt=null;r.day=0;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.voteRound=1;r.lastVoteResult=null;r.lastTieResult=null;
     r.nightActions={};r.lastCold=null;r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};
     r.gnosiaMessages=[];r.privateEndsAt=null;
     emitRoom(r);cb?.({ok:true});
@@ -329,33 +378,7 @@ io.on('connection',(socket)=>{
   socket.on('advancePhase',({expectedPhase}={},cb)=>{
     const r=rooms.get(socket.data.room), p=player(r,socket);
     if(!r||!p||p.id!==r.hostId)return cb?.({ok:false,error:'방장만 단계를 진행할 수 있습니다.'});
-    if(!PHASES.includes(expectedPhase)||r.phase!==expectedPhase){
-      return cb?.({ok:false,error:'이미 다음 단계로 진행되었습니다.'});
-    }
-    if(r.phase==='ROLE_REVEAL'){r.phase='DISCUSSION';log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
-    else if(r.phase==='DISCUSSION'){r.phase='VOTE';r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
-    else if(r.phase==='VOTE_TALLY'){
-      const result=r.lastVoteResult;if(!result)return;
-      r.voteHistory.push({...result,day:r.day});
-      log(r,`투표 ${result.round}차 결과가 기록되었습니다.`,'vote');
-      if(result.outcome==='COLD_SLEEP')log(r,`${result.candidates.find(c=>c.isTop)?.nickname}이 콜드슬립되었습니다.`,'cold');
-      else log(r,'최다 득표자가 동률입니다. 동률 후보 전원의 콜드슬립 여부를 투표합니다.','vote');
-      if(result.outcome==='TIE'){r.tieVotes={};r.lastTieResult=null;r.phase='TIE_VOTE';log(r,'동률 의견 투표를 시작합니다.','vote');}
-      else if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
-      else {r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
-    } else if(r.phase==='TIE_TALLY'){
-      const result=r.lastTieResult;if(!result)return;
-      log(r,`동률 의견 투표: 모두 콜드슬립 ${result.allCount}표 / 모두 콜드슬립 안 함 ${result.noneCount}표`,'vote');
-      log(r,result.decision==='ALL'?'동률 후보 전원이 콜드슬립되었습니다.':'동률 후보 전원을 콜드슬립시키지 않습니다.','cold');
-      if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
-      else {r.phase='PRIVATE';setupPrivateRooms(r);r.privateEndsAt=Date.now()+3*60*1000;log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
-    } else if(r.phase==='NIGHT'){ resolveNight(r); }
-    else if(r.phase==='PRIVATE'){ endPrivate(r); }
-    else if(r.phase==='NIGHT_RESULT'){
-      if(winnerCheck(r)){r.phase='GAME_END';log(r,`게임 종료: ${r.winner} 승리`,'end');}
-      else {r.day++;r.phase='DISCUSSION';log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
-    }
-    emitRoom(r);cb?.({ok:true});
+    cb?.(advanceRoom(r,expectedPhase,{forced:true}));
   });
 
   socket.on('castVote',({targetId},cb)=>{
@@ -424,6 +447,44 @@ io.on('connection',(socket)=>{
   });
 });
 
+function advanceRoom(r,expectedPhase,{forced=false,automatic=false}={}){
+  if(!PHASES.includes(expectedPhase)||r.phase!==expectedPhase)return {ok:false,error:'이미 다음 단계로 진행되었습니다.'};
+  if(r.phase==='VOTE'){
+    if(!forced)return {ok:false,error:'아직 투표가 진행 중입니다.'};
+    if(!Object.keys(r.votes).length)return {ok:false,error:'제출된 표가 없어 집계할 수 없습니다.'};
+    resolveVote(r);return {ok:true};
+  }
+  if(r.phase==='TIE_VOTE'){
+    if(!forced)return {ok:false,error:'아직 동률 의견 투표가 진행 중입니다.'};
+    resolveTieVote(r);return {ok:true};
+  }
+  if(r.phase==='ROLE_REVEAL'){enterPhase(r,'DISCUSSION');log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
+  else if(r.phase==='DISCUSSION'){enterPhase(r,'VOTE');r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.voteRound=1;log(r,'투표를 시작합니다.','vote');}
+  else if(r.phase==='VOTE_TALLY'){
+    const result=r.lastVoteResult;if(!result)return {ok:false,error:'집계 결과가 없습니다.'};
+    r.voteHistory.push({...result,day:r.day});
+    log(r,`투표 ${result.round}차 결과가 기록되었습니다.`,'vote');
+    if(result.outcome==='COLD_SLEEP')log(r,`${result.candidates.find(c=>c.isTop)?.nickname}이 콜드슬립되었습니다.`,'cold');
+    else log(r,'최다 득표자가 동률입니다. 동률 후보 전원의 콜드슬립 여부를 투표합니다.','vote');
+    if(result.outcome==='TIE'){r.tieVotes={};r.lastTieResult=null;enterPhase(r,'TIE_VOTE');log(r,'동률 의견 투표를 시작합니다.','vote');}
+    else if(winnerCheck(r)){enterPhase(r,'GAME_END');log(r,`게임 종료: ${r.winner} 승리`,'end');}
+    else {setupPrivateRooms(r);enterPhase(r,'PRIVATE');log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
+  } else if(r.phase==='TIE_TALLY'){
+    const result=r.lastTieResult;if(!result)return {ok:false,error:'동률 투표 결과가 없습니다.'};
+    log(r,`동률 의견 투표: 모두 콜드슬립 ${result.allCount}표 / 모두 콜드슬립 안 함 ${result.noneCount}표`,'vote');
+    log(r,result.decision==='ALL'?'동률 후보 전원이 콜드슬립되었습니다.':'동률 후보 전원을 콜드슬립시키지 않습니다.','cold');
+    if(winnerCheck(r)){enterPhase(r,'GAME_END');log(r,`게임 종료: ${r.winner} 승리`,'end');}
+    else {setupPrivateRooms(r);enterPhase(r,'PRIVATE');log(r,'밀회 시간입니다. 각자의 개인실에서 시작합니다.','private');}
+  } else if(r.phase==='NIGHT'){resolveNight(r);return {ok:true};}
+  else if(r.phase==='PRIVATE'){endPrivate(r);}
+  else if(r.phase==='NIGHT_RESULT'){
+    if(winnerCheck(r)){enterPhase(r,'GAME_END');log(r,`게임 종료: ${r.winner} 승리`,'end');}
+    else {r.day++;enterPhase(r,'DISCUSSION');log(r,`DAY ${r.day} 토론을 시작합니다.`,'day');}
+  }else return {ok:false,error:'이 단계에서는 진행할 수 없습니다.'};
+  if(automatic)log(r,'제한 시간이 종료되어 다음 단계로 진행했습니다.','system');
+  emitRoom(r);return {ok:true};
+}
+
 function resolveVote(r){
   const counts={};Object.values(r.votes).forEach(id=>counts[id]=(counts[id]||0)+1);
   const max=Math.max(...Object.values(counts));const tied=Object.keys(counts).filter(id=>counts[id]===max);
@@ -437,7 +498,7 @@ function resolveVote(r){
   if(tied.length>1)r.lastCold=null;
   else {const t=r.players.find(x=>x.id===tied[0]);t.alive=false;t.elimination='COLD_SLEEP';r.lastCold=t.id;}
   if(r.lastCold){r.players.filter(x=>x.role==='DOCTOR'&&x.alive).forEach(d=>personal(d,`${r.players.find(x=>x.id===r.lastCold).nickname}: ${r.players.find(x=>x.id===r.lastCold).role==='GNOSIA'?'그노시아':'인간'}`,r.day));}
-  r.phase='VOTE_TALLY';emitRoom(r);
+  enterPhase(r,'VOTE_TALLY');emitRoom(r);
 }
 
 function resolveTieVote(r){
@@ -457,7 +518,7 @@ function resolveTieVote(r){
     });
   }else r.lastCold=null;
   r.lastTieResult={allCount,noneCount,decision,candidates:candidates.map(c=>({id:c.id,nickname:c.nickname}))};
-  r.phase='TIE_TALLY';emitRoom(r);
+  enterPhase(r,'TIE_TALLY');emitRoom(r);
 }
 
 function resolveNight(r){
@@ -469,9 +530,9 @@ function resolveNight(r){
   if(victim&&isAngelProtecting(actions,victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
   else if(victim){const v=r.players.find(x=>x.id===victim);if(canGnosiaEliminate(v)){v.alive=false;v.elimination='VANISHED';log(r,`${v.nickname}이 지난 밤 소멸했습니다.`,'night');}else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');}
   else log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
-  r.phase='NIGHT_RESULT';log(r,'밤의 결과가 공개되었습니다.','night');emitRoom(r);
+  enterPhase(r,'NIGHT_RESULT');log(r,'밤의 결과가 공개되었습니다.','night');emitRoom(r);
 }
-function endPrivate(r){ r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.privateEndsAt=null;r.nightActions={};r.phase='NIGHT';log(r,'밀회가 종료되고 밤이 되었습니다. 역할 행동을 제출하세요.','night'); }
+function endPrivate(r){ r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.nightActions={};enterPhase(r,'NIGHT');log(r,'밀회가 종료되고 밤이 되었습니다. 역할 행동을 제출하세요.','night'); }
 
 const PORT=process.env.PORT||3000;
 async function start() {
@@ -497,4 +558,4 @@ if(require.main===module){
   });
 }
 
-module.exports={canGnosiaEliminate,engineerInspection,isAngelProtecting,resolveNight};
+module.exports={canGnosiaEliminate,engineerInspection,isAngelProtecting,resolveNight,normalizeConfig};

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canGnosiaEliminate, engineerInspection, isAngelProtecting, resolveNight } = require('../server');
+const { canGnosiaEliminate, engineerInspection, isAngelProtecting, resolveNight, normalizeConfig } = require('../server');
 
 function nightRoom(players,nightActions){
   return {
@@ -43,6 +43,13 @@ test('night resolution eliminates a scanned Bug and records Human', () => {
   assert.equal(bug.elimination,'VANISHED');
   assert.equal(engineer.personalLogs[0].text,'버그: 인간');
   assert.ok(room.logs.some(entry=>entry.text==='버그이 지난 밤 소멸했습니다.'));
+});
+
+test('phase timer settings are normalized and unlimited disables auto advance', () => {
+  const config=normalizeConfig({gnosia:1,timers:{DISCUSSION:{seconds:99999,auto:true},VOTE:{seconds:0,auto:true}}});
+  assert.deepEqual(config.timers.DISCUSSION,{seconds:3600,auto:true});
+  assert.deepEqual(config.timers.VOTE,{seconds:0,auto:false});
+  assert.equal(config.timers.PRIVATE.seconds,180);
 });
 
 test('night resolution leaves an Angel-protected target alive', () => {
