@@ -31,6 +31,8 @@ app.use(express.static('public', {
 const rooms = new Map();
 const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
+const HOST_RECONNECT_GRACE_MS = 30000;
+const hostTransferTimers = new Map();
 
 function roomKey(roomCode) {
   return `gnosia:room:${roomCode}`;
@@ -66,6 +68,7 @@ function restoreRoom(room) {
   room.privateLocations ||= {};
   room.privateMessageSince ||= {};
   room.gnosiaMessages = Array.isArray(room.gnosiaMessages) ? room.gnosiaMessages : [];
+  room.hostDisconnectedAt ||= null;
   room.config = normalizeConfig(room.config);
   return room;
 }
@@ -129,6 +132,27 @@ function shuffle(a){ a=[...a]; for(let i=a.length-1;i>0;i--){ const j=Math.floor
 function player(room, socket){ return room.players.find(p=>p.socketId===socket.id); }
 function host(room){ return room.players.find(p=>p.id===room.hostId); }
 function alive(room){ return room.players.filter(p=>p.alive); }
+function cancelHostTransfer(roomCode){
+  const timer=hostTransferTimers.get(roomCode);
+  if(timer)clearTimeout(timer);
+  hostTransferTimers.delete(roomCode);
+}
+function transferHostIfNeeded(room,{immediate=false}={}){
+  const current=host(room);
+  if(current?.socketId){room.hostDisconnectedAt=null;cancelHostTransfer(room.code);return false;}
+  const graceExpired=room.hostDisconnectedAt&&Date.now()-room.hostDisconnectedAt>=HOST_RECONNECT_GRACE_MS;
+  if(!immediate&&!graceExpired)return false;
+  const next=room.players.find(p=>p.id!==room.hostId&&p.socketId);
+  if(!next)return false;
+  room.hostId=next.id;room.hostDisconnectedAt=null;cancelHostTransfer(room.code);
+  log(room,`${next.nickname}님에게 방장 권한이 이전되었습니다.`,'system');
+  emitRoom(room);return true;
+}
+function scheduleHostTransfer(room){
+  cancelHostTransfer(room.code);room.hostDisconnectedAt=Date.now();
+  const timer=setTimeout(()=>{const current=rooms.get(room.code);if(current)transferHostIfNeeded(current,{immediate:true});},HOST_RECONNECT_GRACE_MS);
+  timer.unref?.();hostTransferTimers.set(room.code,timer);void persistRoom(room);
+}
 function canGnosiaEliminate(target){ return !!target?.alive&&!['GNOSIA','BUG'].includes(target.role); }
 function engineerInspection(target){ return {result:target?.role==='GNOSIA'?'그노시아':'인간',eliminates:target?.role==='BUG'}; }
 function isAngelProtecting(actions,targetId){ return actions.some(a=>a.role==='ANGEL'&&a.targetId===targetId); }
@@ -146,7 +170,7 @@ function publicState(room){
   }:room.phase==='TIE_TALLY'?room.lastTieResult:undefined;
   return {
     code:room.code, phase:room.phase, day:room.day, hostId:room.hostId,
-    players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready,online:!!p.socketId})),
+    players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready})),
     config:room.config, logs:room.logs.slice(-80), voteHistory:(room.voteHistory||[]).slice(-20), voteRound:room.voteRound,
     submitted:{ votes:Object.keys(room.votes).length, tieVotes:Object.keys(room.tieVotes||{}).length, night:Object.keys(room.nightActions).length },
     winner:room.winner, privateEndsAt:room.privateEndsAt, resultPlayers, voteResult, tieVote
@@ -219,7 +243,7 @@ io.on('connection',(socket)=>{
   socket.on('createRoom',async ({nickname},cb)=>{
     let c; do c=code(); while(await roomExists(c));
     const p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
-    const room={code:c,hostId:p.id,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},tieVotes:{},voteRound:1,lastVoteResult:null,lastTieResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
+    const room={code:c,hostId:p.id,hostDisconnectedAt:null,players:[p],phase:'LOBBY',day:0,config:{gnosia:1,engineer:true,doctor:true,guard:true,ac:false,bug:false,angel:false},logs:[],voteHistory:[],votes:{},tieVotes:{},voteRound:1,lastVoteResult:null,lastTieResult:null,nightActions:{},lastCold:null,winner:null,privateRooms:[],privateLocations:{},privateMessageSeq:0,privateMessageSince:{},gnosiaMessages:[],privateEndsAt:null};
     rooms.set(c,room); socket.join(c); socket.data.room=c; socket.data.player=p.id; log(room,`${p.nickname}이 방을 만들었습니다.`);
     emitRoom(room); cb?.({ok:true,code:c,token:p.token});
   });
@@ -234,7 +258,10 @@ io.on('connection',(socket)=>{
       p={id:crypto.randomUUID(),token:token(),nickname:nickname.trim().slice(0,20),socketId:socket.id,alive:true,elimination:null,ready:false,role:null,personalLogs:[]};
       room.players.push(p); log(room,`${p.nickname}이 참가했습니다.`);
     }
-    socket.join(c); socket.data.room=c; socket.data.player=p.id; emitRoom(room); cb?.({ok:true,code:c,token:p.token});
+    socket.join(c); socket.data.room=c; socket.data.player=p.id;
+    const hostChanged=transferHostIfNeeded(room);
+    if(!hostChanged)emitRoom(room);
+    cb?.({ok:true,code:c,token:p.token});
   });
 
   socket.on('leaveRoom',async (_,cb)=>{
@@ -252,17 +279,10 @@ io.on('connection',(socket)=>{
     socket.data.room=null;
     socket.data.player=null;
 
-    if(r.phase==='LOBBY')r.players=r.players.filter(x=>x.id!==p.id);
-    if(r.hostId===p.id&&r.players.length){
-      r.hostId=(r.players.find(x=>x.id!==p.id&&x.socketId)||r.players.find(x=>x.id!==p.id)||p).id;
-    }
-    if(!r.players.length){
-      rooms.delete(r.code);
-      if(redisClient?.isReady){
-        try{await redisClient.del(roomKey(r.code));}catch(error){console.error(`Failed to remove room ${r.code}:`,error.message);}
-      }
-    }else emitRoom(r);
-    cb?.({ok:true});
+    const hostChanged=r.hostId===p.id&&transferHostIfNeeded(r,{immediate:true});
+    if(r.hostId===p.id&&!hostChanged)r.hostDisconnectedAt=Date.now()-HOST_RECONNECT_GRACE_MS;
+    if(!hostChanged)emitRoom(r);
+    cb?.({ok:true,code:r.code,token:p.token});
   });
 
   socket.on('toggleReady',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||r.phase!=='LOBBY')return; p.ready=!p.ready; emitRoom(r); });
@@ -378,7 +398,14 @@ io.on('connection',(socket)=>{
     void persistRoom(r);
   });
 
-  socket.on('disconnect',()=>{ const r=rooms.get(socket.data.room); if(!r)return; const p=r.players.find(x=>x.id===socket.data.player);if(p?.socketId===socket.id){p.socketId=null;emitRoom(r);} });
+  socket.on('disconnect',()=>{
+    const r=rooms.get(socket.data.room);if(!r)return;
+    const p=r.players.find(x=>x.id===socket.data.player);
+    if(p?.socketId!==socket.id)return;
+    p.socketId=null;
+    if(r.hostId===p.id)scheduleHostTransfer(r);
+    else emitRoom(r);
+  });
 });
 
 function resolveVote(r){
