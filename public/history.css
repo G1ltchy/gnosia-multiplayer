@@ -42,6 +42,113 @@
   padding: 0 14px;
 }
 
+.historyPanel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.historyHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 26px 18px;
+  border-bottom: 1px solid #39d7ff44;
+  background: linear-gradient(120deg, #0b2942, #071426 70%);
+}
+
+.historyHeader h2 {
+  margin: 4px 0 0;
+  font-size: 28px;
+}
+
+.historyHeader > span {
+  padding: 7px 11px;
+  border: 1px solid #39d7ff66;
+  border-radius: 999px;
+  color: #ccefff;
+  font-size: 13px;
+}
+
+.historyDays {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.historyDay {
+  overflow: hidden;
+  border: 1px solid #245474;
+  border-radius: 14px;
+  background: #061225cc;
+}
+
+.historyDay > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 17px;
+  cursor: pointer;
+}
+
+.historyDay > summary strong {
+  color: var(--cyan);
+  letter-spacing: .1em;
+}
+
+.historyDay > summary small {
+  color: var(--muted);
+}
+
+.historyDay[open] > summary {
+  border-bottom: 1px solid #245474;
+  background: #0b294277;
+}
+
+.historyDayBody {
+  padding: 14px;
+}
+
+.historyTimeline {
+  display: grid;
+  gap: 8px;
+}
+
+.historyEvent {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 11px 13px;
+  border-left: 3px solid #3b7994;
+  border-radius: 4px 10px 10px 4px;
+  background: #0a1b31;
+}
+
+.historyEvent > span {
+  color: #75dbf4;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.historyEvent p {
+  margin: 0;
+  color: #e1f6ff;
+  line-height: 1.45;
+}
+
+.historyEvent.vote { border-left-color: #41d8ff; }
+.historyEvent.cold { border-left-color: #6f9fff; }
+.historyEvent.private { border-left-color: #b48cff; }
+.historyEvent.night { border-left-color: #ff6688; }
+.historyEvent.end { border-left-color: var(--gold); }
+
+.historyDayBody > .voteHistoryList {
+  margin-bottom: 14px;
+}
+
 .resultActions {
   display: flex;
   justify-content: center;
@@ -98,6 +205,24 @@
 @media (max-width: 430px) {
   .roleSettings {
     grid-template-columns: 1fr;
+  }
+
+  .historyHeader {
+    padding: 20px 18px 15px;
+  }
+
+  .historyDays {
+    padding: 12px;
+  }
+
+  .historyDay > summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .historyEvent {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }
 

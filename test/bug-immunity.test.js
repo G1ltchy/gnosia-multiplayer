@@ -42,6 +42,7 @@ test('night resolution eliminates a scanned Bug and records Human', () => {
   assert.equal(bug.alive,false);
   assert.equal(bug.elimination,'VANISHED');
   assert.equal(engineer.personalLogs[0].text,'버그: 인간');
+  assert.ok(room.logs.some(entry=>entry.text==='버그이 지난 밤 소멸했습니다.'));
 });
 
 test('night resolution leaves an Angel-protected target alive', () => {

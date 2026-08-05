@@ -195,9 +195,13 @@ function privateState(room,p){
     gnosiaMessages:p.role==='GNOSIA'?(room.gnosiaMessages||[]):undefined
   };
 }
+function emitPrivateState(room,p){
+  if(p.socketId) io.to(p.socketId).emit('privateState',privateState(room,p));
+}
+function emitPrivateStates(room){ room.players.forEach(p=>emitPrivateState(room,p)); }
 function emitRoom(room){
   io.to(room.code).emit('state',publicState(room));
-  room.players.forEach(p=>{ if(p.socketId) io.to(p.socketId).emit('privateState',privateState(room,p)); });
+  emitPrivateStates(room);
   void persistRoom(room);
 }
 function log(room,text,type='info'){ room.logs.push({day:room.day,text,type,time:Date.now()}); }
@@ -251,7 +255,19 @@ io.on('connection',(socket)=>{
   socket.on('joinRoom',async ({code:raw,nickname,token:resumeToken},cb)=>{
     const c=String(raw||'').toUpperCase(); const room=await getRoom(c); if(!room) return cb?.({ok:false,error:'방을 찾을 수 없습니다.'});
     let p=resumeToken?room.players.find(x=>x.token===resumeToken):null;
-    if(p){ p.socketId=socket.id; }
+    if(p){
+      const previousSocketId=p.socketId;
+      if(previousSocketId&&previousSocketId!==socket.id){
+        const previousSocket=io.sockets.sockets.get(previousSocketId);
+        if(previousSocket){
+          previousSocket.leave(c);
+          previousSocket.data.room=null;
+          previousSocket.data.player=null;
+          previousSocket.emit('sessionReplaced');
+        }
+      }
+      p.socketId=socket.id;
+    }
     else {
       if(room.phase!=='LOBBY') return cb?.({ok:false,error:'이미 게임이 시작되었습니다.'});
       if(room.players.some(x=>x.nickname===nickname.trim())) return cb?.({ok:false,error:'이미 사용 중인 이름입니다.'});
@@ -321,7 +337,7 @@ io.on('connection',(socket)=>{
     else if(r.phase==='VOTE_TALLY'){
       const result=r.lastVoteResult;if(!result)return;
       r.voteHistory.push({...result,day:r.day});
-      log(r,`투표 ${result.round}차: ${result.ballots.map(b=>`${b.voterNickname} → ${b.targetNickname}`).join(' / ')}`,'vote');
+      log(r,`투표 ${result.round}차 결과가 기록되었습니다.`,'vote');
       if(result.outcome==='COLD_SLEEP')log(r,`${result.candidates.find(c=>c.isTop)?.nickname}이 콜드슬립되었습니다.`,'cold');
       else log(r,'최다 득표자가 동률입니다. 동률 후보 전원의 콜드슬립 여부를 투표합니다.','vote');
       if(result.outcome==='TIE'){r.tieVotes={};r.lastTieResult=null;r.phase='TIE_VOTE';log(r,'동률 의견 투표를 시작합니다.','vote');}
@@ -373,13 +389,13 @@ io.on('connection',(socket)=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return cb?.({ok:false,error:'지금은 방을 이동할 수 없습니다.'});
     const target=r.privateRooms.find(x=>x.id===roomId);if(!target)return cb?.({ok:false,error:'존재하지 않는 방입니다.'});
     if(target.locked&&target.ownerId!==p.id)return cb?.({ok:false,error:'문이 잠겨 있습니다.'});
-    r.privateLocations[p.id]=target.id;r.privateMessageSince[p.id]=r.privateMessageSeq;emitRoom(r);cb?.({ok:true});
+    r.privateLocations[p.id]=target.id;r.privateMessageSince[p.id]=r.privateMessageSeq;emitPrivateState(r,p);void persistRoom(r);cb?.({ok:true});
   });
   socket.on('togglePrivateRoomLock',(_,cb)=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return cb?.({ok:false,error:'지금은 문을 잠글 수 없습니다.'});
     const current=r.privateRooms.find(x=>x.id===r.privateLocations[p.id]);
     if(!current||current.type!=='PERSONAL'||current.ownerId!==p.id)return cb?.({ok:false,error:'자신의 개인실 안에서만 문을 잠글 수 있습니다.'});
-    current.locked=!current.locked;emitRoom(r);cb?.({ok:true,locked:current.locked});
+    current.locked=!current.locked;emitPrivateStates(r);void persistRoom(r);cb?.({ok:true,locked:current.locked});
   });
   socket.on('privateMessage',({text})=>{
     const r=rooms.get(socket.data.room);if(!r)return;const p=player(r,socket);if(!p||r.phase!=='PRIVATE'||!p.alive)return;
@@ -447,7 +463,7 @@ function resolveTieVote(r){
 function resolveNight(r){
   const actions=Object.values(r.nightActions);
   const eng=actions.filter(a=>a.role==='ENGINEER');
-  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);const inspection=engineerInspection(target);if(inspection.eliminates){target.alive=false;target.elimination='VANISHED';log(r,`${target.nickname}이 흔적도 없이 사라졌습니다.`,'night');}personal(actor,`${target.nickname}: ${inspection.result}`,r.day);});
+  eng.forEach(a=>{const actor=r.players.find(x=>r.nightActions[x.id]===a);const target=r.players.find(x=>x.id===a.targetId);const inspection=engineerInspection(target);if(inspection.eliminates){target.alive=false;target.elimination='VANISHED';log(r,`${target.nickname}이 지난 밤 소멸했습니다.`,'night');}personal(actor,`${target.nickname}: ${inspection.result}`,r.day);});
   const attacks=actions.filter(a=>a.role==='GNOSIA').map(a=>a.targetId);
   let victim=null;if(attacks.length){const freq={};attacks.forEach(id=>freq[id]=(freq[id]||0)+1);victim=Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];}
   if(victim&&isAngelProtecting(actions,victim))log(r,'지난 밤, 아무도 소멸하지 않았습니다.','night');
