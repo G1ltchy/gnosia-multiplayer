@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canGnosiaEliminate, engineerInspection, isAngelProtecting, resolveNight, normalizeConfig } = require('../server');
+const { canGnosiaEliminate, engineerInspection, isAngelProtecting, resolveNight, normalizeConfig, configuredRoles, drawHiddenRoles } = require('../server');
 
 function nightRoom(players,nightActions){
   return {
@@ -50,6 +50,13 @@ test('phase timer settings are normalized and unlimited disables auto advance', 
   assert.deepEqual(config.timers.DISCUSSION,{seconds:3600,auto:true});
   assert.deepEqual(config.timers.VOTE,{seconds:0,auto:false});
   assert.equal(config.timers.PRIVATE.seconds,180);
+});
+
+test('AC and Bug toggles create hidden candidates instead of guaranteed public roles', () => {
+  const config=normalizeConfig({gnosia:1,engineer:true,ac:true,bug:true});
+  assert.deepEqual(configuredRoles(config),['GNOSIA','ENGINEER']);
+  assert.deepEqual(drawHiddenRoles(config,()=>false),[]);
+  assert.deepEqual(drawHiddenRoles(config,()=>true),['AC','BUG']);
 });
 
 test('night resolution leaves an Angel-protected target alive', () => {

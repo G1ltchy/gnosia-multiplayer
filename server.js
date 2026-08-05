@@ -31,6 +31,8 @@ app.use(express.static('public', {
 const rooms = new Map();
 const PHASES = ['LOBBY','ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT','GAME_END'];
 const SPECIAL_ROLES = ['engineer','doctor','guard','ac','bug','angel'];
+const PUBLIC_SPECIAL_ROLES = ['engineer','doctor','guard','angel'];
+const HIDDEN_RANDOM_ROLES = ['ac','bug'];
 const TIMER_PHASES = ['ROLE_REVEAL','DISCUSSION','VOTE','VOTE_TALLY','TIE_VOTE','TIE_TALLY','PRIVATE','NIGHT','NIGHT_RESULT'];
 const DEFAULT_TIMERS = {ROLE_REVEAL:60,DISCUSSION:300,VOTE:120,VOTE_TALLY:30,TIE_VOTE:60,TIE_TALLY:30,PRIVATE:180,NIGHT:120,NIGHT_RESULT:45};
 const HOST_RECONNECT_GRACE_MS = 30000;
@@ -178,7 +180,7 @@ function publicState(room){
     players:room.players.map(p=>({id:p.id,nickname:p.nickname,alive:p.alive,elimination:p.elimination,ready:p.ready})),
     config:room.config, logs:room.logs.slice(-80), voteHistory:(room.voteHistory||[]).slice(-20), voteRound:room.voteRound,
     submitted:{ votes:Object.keys(room.votes).length, tieVotes:Object.keys(room.tieVotes||{}).length, night:Object.keys(room.nightActions).length },
-    winner:room.winner, phaseEndsAt:room.phaseEndsAt||null, serverNow:Date.now(), resultPlayers, voteResult, tieVote
+    winner:room.winner, phaseEndsAt:room.phaseEndsAt||null, serverNow:Date.now(), dayOneBriefing:room.day===1?room.dayOneBriefing:undefined, resultPlayers, voteResult, tieVote
   };
 }
 function privateState(room,p){
@@ -228,9 +230,10 @@ function normalizeConfig(config = {}) {
 function configuredRoles(config) {
   return [
     ...Array(config.gnosia).fill('GNOSIA'),
-    ...SPECIAL_ROLES.flatMap(role => config[role] ? Array(role === 'guard' ? 2 : 1).fill(role.toUpperCase()) : [])
+    ...PUBLIC_SPECIAL_ROLES.flatMap(role => config[role] ? Array(role === 'guard' ? 2 : 1).fill(role.toUpperCase()) : [])
   ];
 }
+function drawHiddenRoles(config,coin=()=>crypto.randomInt(2)===1){return HIDDEN_RANDOM_ROLES.filter(role=>config[role]&&coin(role)).map(role=>role.toUpperCase());}
 function setupPrivateRooms(room) {
   const publicRooms=['식당','라운지','창고'].map((name,index)=>({
     id:`public-${index}`,name,type:'PUBLIC',ownerId:null,locked:false,messages:[]
@@ -356,10 +359,13 @@ io.on('connection',(socket)=>{
   socket.on('startGame',(_,cb)=>{
     const r=rooms.get(socket.data.room); if(!r)return; const p=player(r,socket); if(!p||p.id!==r.hostId)return;
     r.config=normalizeConfig(r.config);
-    const roles=configuredRoles(r.config);
-    if(roles.length>r.players.length) return cb?.({ok:false,error:`활성화된 역할 수(${roles.length})가 참가자 수(${r.players.length})보다 많습니다.`});
+    const fixedRoles=configuredRoles(r.config),hiddenCandidates=HIDDEN_RANDOM_ROLES.filter(role=>r.config[role]).length;
+    const maximumSlots=fixedRoles.length+hiddenCandidates+(hiddenCandidates?1:0);
+    if(maximumSlots>r.players.length) return cb?.({ok:false,error:`공개 역할과 비공개 후보를 배정하려면 최소 ${maximumSlots}명이 필요합니다.`});
+    const roles=[...fixedRoles,...drawHiddenRoles(r.config)];
     while(roles.length<r.players.length) roles.push('CREW');
     const mixed=shuffle(roles); r.players.forEach((x,i)=>{x.role=mixed[i];x.alive=true;x.elimination=null;x.personalLogs=[];});
+    r.dayOneBriefing={gnosiaCount:r.config.gnosia,roles:[...new Set(roles.filter(role=>!['GNOSIA','AC','BUG'].includes(role)))].map(role=>({role,label:ROLE_INFO[role].label}))};
     enterPhase(r,'ROLE_REVEAL');r.day=1;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.lastVoteResult=null;r.lastTieResult=null;r.nightActions={};r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};r.gnosiaMessages=[];r.voteRound=1; log(r,'역할이 배정되었습니다. 각자 자신의 역할을 확인하세요.','system'); emitRoom(r); cb?.({ok:true});
   });
 
@@ -369,7 +375,7 @@ io.on('connection',(socket)=>{
     if(!p||p.id!==r.hostId)return cb?.({ok:false,error:'방장만 대기 로비로 돌아갈 수 있습니다.'});
     if(r.phase!=='GAME_END')return cb?.({ok:false,error:'게임이 종료된 뒤에만 대기 로비로 돌아갈 수 있습니다.'});
     r.players.forEach(x=>{x.role=null;x.alive=true;x.elimination=null;x.ready=false;x.personalLogs=[];});
-    cancelPhaseTimer(r.code);r.phase='LOBBY';r.phaseEndsAt=null;r.day=0;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.voteRound=1;r.lastVoteResult=null;r.lastTieResult=null;
+    cancelPhaseTimer(r.code);r.phase='LOBBY';r.phaseEndsAt=null;r.day=0;r.dayOneBriefing=null;r.winner=null;r.logs=[];r.voteHistory=[];r.votes={};r.tieVotes={};r.voteRound=1;r.lastVoteResult=null;r.lastTieResult=null;
     r.nightActions={};r.lastCold=null;r.privateRooms=[];r.privateLocations={};r.privateMessageSeq=0;r.privateMessageSince={};
     r.gnosiaMessages=[];r.privateEndsAt=null;
     emitRoom(r);cb?.({ok:true});
@@ -558,4 +564,4 @@ if(require.main===module){
   });
 }
 
-module.exports={canGnosiaEliminate,engineerInspection,isAngelProtecting,resolveNight,normalizeConfig};
+module.exports={canGnosiaEliminate,engineerInspection,isAngelProtecting,resolveNight,normalizeConfig,configuredRoles,drawHiddenRoles};

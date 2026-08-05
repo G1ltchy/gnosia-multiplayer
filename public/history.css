@@ -257,6 +257,21 @@
   align-items: stretch;
 }
 
+.settingsHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settingsHeading > span {
+  padding: 6px 9px;
+  border: 1px solid #39d7ff55;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .roleSetting {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr);
@@ -297,6 +312,87 @@
   align-self: start;
   height: 40px;
   margin: 2px 0 0;
+}
+
+.roleSettingValue {
+  align-self: start;
+  width: fit-content;
+  margin-top: 5px;
+  padding: 6px 9px;
+  border: 1px solid #37536a;
+  border-radius: 7px;
+  color: #8da8b4;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.roleSettingValue.on {
+  border-color: #39d7ff66;
+  color: var(--cyan);
+}
+
+.roleSetting.randomRole {
+  border-color: #c58cff55;
+  background: linear-gradient(135deg, #15152f99, #07142699);
+}
+
+.lobbyControls .timerConfig {
+  margin-top: 0;
+}
+
+.dayOneBriefing {
+  border-color: #49ddff88;
+  background: linear-gradient(145deg, #0c3751, #071426 72%);
+}
+
+.dayOneBriefing h2 {
+  margin-top: 5px;
+}
+
+.gnosiaDetection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 18px 0;
+  padding: 16px 18px;
+  border: 1px solid #ff668877;
+  border-radius: 12px;
+  background: #2a102099;
+}
+
+.gnosiaDetection span {
+  color: #ffdbe3;
+  font-weight: 700;
+}
+
+.gnosiaDetection strong {
+  color: #ff8ba5;
+  font-size: 30px;
+}
+
+.briefingRoles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.briefingRoles > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid #39d7ff55;
+  border-radius: 10px;
+  background: #091a32;
+  color: #e5faff;
+  font-weight: 700;
+}
+
+.briefingRoles img {
+  width: 34px;
+  height: 42px;
+  object-fit: contain;
 }
 
 @media (max-width: 430px) {
