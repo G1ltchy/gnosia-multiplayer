@@ -604,3 +604,91 @@
     grid-template-columns: 1fr;
   }
 }
+
+.player {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.playerInfo {
+  min-width: 0;
+}
+
+.playerInfo > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playerKick {
+  flex: 0 0 auto;
+  border: 1px solid #ff668888;
+  border-radius: 8px;
+  background: #53142a;
+  color: #ffb2c1;
+  padding: 7px 9px;
+  font-size: 12px;
+}
+
+.playerKick.confirm {
+  border-color: #ffc94b;
+  background: #6d4b10;
+  color: #fff0ad;
+}
+
+.roomManagement .settingsHeading h2 {
+  margin: 4px 0 0;
+}
+
+.presetGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0;
+}
+
+.presetGrid button {
+  display: grid;
+  gap: 5px;
+  min-height: 76px;
+  padding: 13px;
+  text-align: left;
+  border: 1px solid #2a6b8a;
+  border-radius: 11px;
+  background: #091a32;
+  color: white;
+}
+
+.presetGrid button:hover {
+  border-color: var(--cyan);
+  background: #0d2745;
+}
+
+.presetGrid small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.passwordEditor {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 9px;
+  align-items: end;
+}
+
+.passwordEditor input {
+  margin-bottom: 0;
+}
+
+.passwordEditor .btn {
+  min-height: 45px;
+}
+
+@media (max-width: 600px) {
+  .presetGrid,
+  .passwordEditor {
+    grid-template-columns: 1fr;
+  }
+}

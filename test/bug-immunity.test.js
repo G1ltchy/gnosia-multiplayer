@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canGnosiaEliminate, engineerInspection, isAngelProtecting, resolveNight, normalizeConfig, configuredRoles, drawHiddenRoles } = require('../server');
+const { canGnosiaEliminate, engineerInspection, isAngelProtecting, resolveNight, normalizeConfig, presetConfig, configuredRoles, drawHiddenRoles, setRoomPassword, verifyRoomPassword } = require('../server');
 
 function nightRoom(players,nightActions){
   return {
@@ -57,6 +57,31 @@ test('AC and Bug toggles create hidden candidates instead of guaranteed public r
   assert.deepEqual(configuredRoles(config),['GNOSIA','ENGINEER']);
   assert.deepEqual(drawHiddenRoles(config,()=>false),[]);
   assert.deepEqual(drawHiddenRoles(config,()=>true),['AC','BUG']);
+});
+
+test('room passwords are salted, verified, and can be cleared', () => {
+  const room={};
+  setRoomPassword(room,'secret');
+  assert.equal(verifyRoomPassword(room,'secret'),true);
+  assert.equal(verifyRoomPassword(room,'wrong'),false);
+  assert.equal(JSON.stringify(room).includes('secret'),false);
+  setRoomPassword(room,'');
+  assert.equal(room.passwordHash,null);
+  assert.equal(verifyRoomPassword(room,'anything'),true);
+});
+
+test('room presets preserve the intended settings', () => {
+  const current=normalizeConfig({gnosia:2,engineer:false,ac:true,bug:false});
+  const quick=presetConfig('QUICK',current);
+  assert.equal(quick.gnosia,2);
+  assert.equal(quick.ac,true);
+  assert.deepEqual(quick.timers.PRIVATE,{seconds:120,auto:true});
+  const unlimited=presetConfig('UNLIMITED',current);
+  assert.ok(Object.values(unlimited.timers).every(setting=>setting.seconds===0&&setting.auto===false));
+  const standard=presetConfig('STANDARD',current);
+  assert.equal(standard.engineer,true);
+  assert.equal(standard.ac,false);
+  assert.equal(presetConfig('UNKNOWN',current),null);
 });
 
 test('night resolution leaves an Angel-protected target alive', () => {
